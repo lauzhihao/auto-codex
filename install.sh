@@ -244,8 +244,19 @@ cat > "${WRAPPER_PATH}" <<'EOF'
 set -euo pipefail
 export AUTO_CODEX_HOME="${HOME}/.local/share/auto-codex"
 export AUTO_CODEX_PROG="auto-codex"
+export AUTO_CODEX_RAW_BASE="__AUTO_CODEX_RAW_BASE__"
 exec python3 "${AUTO_CODEX_HOME}/codex-autoswitch.py" "$@"
 EOF
+
+python3 - "${WRAPPER_PATH}" "${RAW_BASE}" <<'PY'
+from pathlib import Path
+import sys
+
+wrapper_path = Path(sys.argv[1])
+raw_base = sys.argv[2]
+text = wrapper_path.read_text(encoding="utf-8")
+wrapper_path.write_text(text.replace("__AUTO_CODEX_RAW_BASE__", raw_base), encoding="utf-8")
+PY
 
 chmod 0755 "${WRAPPER_PATH}"
 

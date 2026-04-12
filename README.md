@@ -35,10 +35,15 @@ The installer:
 
 ```bash
 codex
+codex update
+codex update --yes
 codex resume --last
 auto-codex list
 codex-original --help
 ```
+
+`codex update` updates `auto-codex` itself from the configured install source.
+Use `codex-original` if you need the underlying Codex CLI directly.
 
 ## Publish Checklist
 

@@ -21,7 +21,8 @@ STATE_VERSION = 1
 DEFAULT_USAGE_BASE_URL = "https://chatgpt.com/backend-api"
 DEFAULT_STATE_BASENAME = "auto-codex"
 LEGACY_STATE_BASENAME = "codex-autoswitch"
-KNOWN_COMMANDS = {"launch", "auto", "login", "list", "refresh", "import-auth", "import-known"}
+DEFAULT_INSTALL_BASE_URL = "https://raw.githubusercontent.com/lauzhihao/auto-codex/main"
+KNOWN_COMMANDS = {"launch", "auto", "login", "list", "refresh", "update", "import-auth", "import-known"}
 
 
 def main() -> int:
@@ -43,6 +44,8 @@ def main() -> int:
         return cmd_list(args, state_dir, state)
     if args.command == "refresh":
         return cmd_refresh(args, state_dir, state)
+    if args.command == "update":
+        return cmd_update(args, state_dir, state)
     if args.command == "import-auth":
         return cmd_import_auth(args, state_dir, state)
     if args.command == "import-known":
@@ -147,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("list", help="List known accounts and cached usage.")
     subparsers.add_parser("refresh", help="Refresh usage for all known accounts.")
+    update = subparsers.add_parser("update", help="Update auto-codex from its install source.")
+    update.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the install confirmation prompt during update.",
+    )
     subparsers.add_parser("passthrough", help=argparse.SUPPRESS)
 
     import_auth = subparsers.add_parser(
@@ -503,6 +512,31 @@ def cmd_passthrough(args: argparse.Namespace, state_dir: Path, state: dict) -> i
     return run_codex_passthrough(args.extra_codex_args)
 
 
+def cmd_update(args: argparse.Namespace, state_dir: Path, state: dict) -> int:
+    _ = state
+    install_base = resolve_install_base_url()
+    install_url = f"{install_base.rstrip('/')}/install.sh"
+    temp_root = state_dir / ".tmp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="auto-codex-update-", dir=temp_root) as tmp:
+        installer_path = Path(tmp) / "install.sh"
+        try:
+            with urllib.request.urlopen(install_url, timeout=30) as response:
+                installer_path.write_bytes(response.read())
+        except Exception as exc:
+            raise SystemExit(f"Failed to download installer from {install_url}: {exc}") from exc
+
+        installer_path.chmod(0o755)
+        env = os.environ.copy()
+        env["AUTO_CODEX_RAW_BASE"] = install_base
+        if args.yes:
+            env["AUTO_CODEX_YES"] = "1"
+
+        print(f"Updating auto-codex from {install_url}", flush=True)
+        return subprocess.run(["bash", str(installer_path)], env=env).returncode
+
+
 def ensure_best_account(
     args: argparse.Namespace,
     state_dir: Path,
@@ -619,6 +653,10 @@ def merge_usage_with_previous(previous: dict | None, update: dict) -> dict:
     merged = dict(previous)
     merged.update(update)
     return merged
+
+
+def resolve_install_base_url() -> str:
+    return os.environ.get("AUTO_CODEX_RAW_BASE", DEFAULT_INSTALL_BASE_URL).strip().rstrip("/")
 
 
 def resolve_usage_url(config_path: Path | None) -> str:
