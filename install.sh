@@ -86,6 +86,11 @@ done < <(select_rc_files)
 if [[ -f "${HOME}/.codex/auth.json" ]]; then
   if "${WRAPPER_PATH}" import-known >/dev/null; then
     echo "Imported ${HOME}/.codex/auth.json into auto-codex."
+    if "${WRAPPER_PATH}" refresh >/dev/null; then
+      echo "Refreshed auto-codex usage cache."
+    else
+      echo "Imported ${HOME}/.codex/auth.json, but refreshing usage cache failed." >&2
+    fi
   else
     echo "Install succeeded, but importing ${HOME}/.codex/auth.json failed." >&2
   fi
