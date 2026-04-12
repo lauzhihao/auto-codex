@@ -414,7 +414,9 @@ def cmd_login(args: argparse.Namespace, state_dir: Path, state: dict) -> int:
 
 def run_device_auth_login(state_dir: Path, state: dict) -> dict:
     codex_bin = resolve_codex_bin()
-    with tempfile.TemporaryDirectory(prefix="codex-autoswitch-login-") as tmp:
+    temp_root = state_dir / ".tmp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="codex-autoswitch-login-", dir=temp_root) as tmp:
         tmp_home = Path(tmp)
         env = os.environ.copy()
         env["CODEX_HOME"] = str(tmp_home)
