@@ -18,7 +18,6 @@ The installer:
 - downloads `codex-autoswitch.py` into `~/.local/share/auto-codex/`
 - creates `~/.local/bin/scodex`
 - imports `~/.codex/auth.json` into `auto-codex` state when it exists
-- also imports AI Accounts Hub managed Codex homes when present
 - refreshes usage cache after import when the usage API is reachable
 - adds or updates a managed `alias scodex-original="..."` block in `~/.zshrc` and/or `~/.bashrc`
 - keeps all runtime state on the local machine
@@ -49,6 +48,7 @@ Use `scodex-original` if you need the underlying Codex CLI directly.
 - Account refresh runs against the live usage API, not only the local cache.
 - Refresh uses up to 8 parallel workers by default. Override with `AUTO_CODEX_REFRESH_WORKERS`.
 - Account selection prefers higher `5h` remaining quota before weekly quota so the chosen account is more likely to be immediately usable.
+- To also import AI Accounts Hub managed Codex homes, set `AUTO_CODEX_IMPORT_ACCOUNTS_HUB=1` before running `scodex import-known` or `scodex`.
 
 ## Publish Checklist
 

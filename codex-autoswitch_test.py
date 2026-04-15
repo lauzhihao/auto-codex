@@ -72,7 +72,7 @@ class CodexAutoswitchTest(unittest.TestCase):
         self.assertIsNotNone(best)
         self.assertEqual(best["id"], "five-heavy")
 
-    def test_import_known_sources_includes_ai_accounts_hub_homes(self) -> None:
+    def test_import_known_sources_skips_ai_accounts_hub_homes_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_home = Path(tmp_dir)
             managed_home = (
@@ -97,6 +97,40 @@ class CodexAutoswitchTest(unittest.TestCase):
                     os.environ.pop("HOME", None)
                 else:
                     os.environ["HOME"] = previous_home
+
+            self.assertEqual(imported, [])
+
+    def test_import_known_sources_includes_ai_accounts_hub_homes_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            managed_home = (
+                tmp_home
+                / "Library"
+                / "Application Support"
+                / "com.murong.ai-accounts-hub"
+                / "codex"
+                / "managed-codex-homes"
+                / "acct-1"
+            )
+            write_auth(managed_home / "auth.json", "hub@example.com", "acct-hub")
+
+            previous_home = os.environ.get("HOME")
+            previous_import_flag = os.environ.get("AUTO_CODEX_IMPORT_ACCOUNTS_HUB")
+            os.environ["HOME"] = str(tmp_home)
+            os.environ["AUTO_CODEX_IMPORT_ACCOUNTS_HUB"] = "1"
+            state_dir = tmp_home / ".local" / "share" / "auto-codex"
+            state = {"version": 1, "accounts": [], "usage_cache": {}}
+            try:
+                imported = autoswitch.import_known_sources(state_dir, state)
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+                if previous_import_flag is None:
+                    os.environ.pop("AUTO_CODEX_IMPORT_ACCOUNTS_HUB", None)
+                else:
+                    os.environ["AUTO_CODEX_IMPORT_ACCOUNTS_HUB"] = previous_import_flag
 
             self.assertEqual(len(imported), 1)
             self.assertEqual(imported[0]["email"], "hub@example.com")

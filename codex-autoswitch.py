@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument(
         "--no-import-known",
         action="store_true",
-        help="Do not auto-import current ~/.codex or AI Accounts Hub managed homes.",
+        help="Do not auto-import current ~/.codex/auth.json.",
     )
     launch.add_argument(
         "--no-login",
@@ -130,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument(
         "--no-import-known",
         action="store_true",
-        help="Do not auto-import current ~/.codex or AI Accounts Hub managed homes.",
+        help="Do not auto-import current ~/.codex/auth.json.",
     )
     auto.add_argument(
         "--no-login",
@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "import-known",
-        help="Import ~/.codex/auth.json and common AI Accounts Hub managed homes.",
+        help="Import ~/.codex/auth.json. Set AUTO_CODEX_IMPORT_ACCOUNTS_HUB=1 to also import AI Accounts Hub managed homes.",
     )
 
     return parser
@@ -388,6 +388,14 @@ def import_known_sources(state_dir: Path, state: dict) -> list[dict]:
             return
 
     maybe_import(Path.home() / ".codex" / "auth.json")
+
+    if os.environ.get("AUTO_CODEX_IMPORT_ACCOUNTS_HUB", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return dedupe_imported(imported)
 
     home = Path.home()
     candidate_roots = [
