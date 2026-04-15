@@ -502,15 +502,51 @@ def refresh_and_print_accounts(state_dir: Path, state: dict, *, announce_refresh
         print(f"Refreshed {len(state['accounts'])} account(s).")
     accounts = state["accounts"]
     active = read_live_identity()
-    for account in sorted(accounts, key=lambda item: item["email"]):
-        usage = state["usage_cache"].get(account["id"], {})
-        marker = "*" if identity_matches(account, active) else " "
-        weekly = format_percent(usage.get("weekly_remaining_percent"))
-        five_hour = format_percent(usage.get("five_hour_remaining_percent"))
-        relogin = " relogin" if usage.get("needs_relogin") else ""
-        plan = account.get("plan") or usage.get("plan") or "Unknown"
-        print(f"{marker} {account['email']} [{plan}] weekly={weekly} 5h={five_hour}{relogin}")
+    print(render_account_table(accounts, state["usage_cache"], active))
+    print(f"{len(accounts)} row(s) in set.")
     return 0
+
+
+def render_account_table(accounts: list[dict], usage_cache: dict, active: dict | None) -> str:
+    rows = []
+    for account in sorted(accounts, key=lambda item: item["email"]):
+        usage = usage_cache.get(account["id"], {})
+        plan = account.get("plan") or usage.get("plan") or "Unknown"
+        rows.append([
+            "*" if identity_matches(account, active) else "",
+            account["email"],
+            plan,
+            format_percent(usage.get("five_hour_remaining_percent")),
+            format_percent(usage.get("weekly_remaining_percent")),
+            format_account_status(usage),
+        ])
+    return render_ascii_table(["Active", "Email", "Plan", "5h", "Weekly", "Status"], rows)
+
+
+def format_account_status(usage: dict) -> str:
+    if usage.get("needs_relogin"):
+        return "relogin"
+    if usage.get("last_sync_error"):
+        return "error"
+    return "ok"
+
+
+def render_ascii_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [
+        max(len(str(header)), *(len(str(row[idx])) for row in rows))
+        for idx, header in enumerate(headers)
+    ]
+    border = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def render_row(values: list[str]) -> str:
+        cells = [str(value).ljust(widths[idx]) for idx, value in enumerate(values)]
+        return "| " + " | ".join(cells) + " |"
+
+    lines = [border, render_row(headers), border]
+    for row in rows:
+        lines.append(render_row(row))
+        lines.append(border)
+    return "\n".join(lines)
 
 
 def cmd_auto(args: argparse.Namespace, state_dir: Path, state: dict) -> int:
@@ -894,7 +930,7 @@ def print_selection(account: dict, usage: dict, prefix: str) -> None:
 
 def format_percent(value) -> str:
     if value is None:
-        return "n/a"
+        return "N/A"
     return f"{int(value)}%"
 
 
