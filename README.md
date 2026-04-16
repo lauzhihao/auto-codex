@@ -6,35 +6,55 @@
 
 The repository is intentionally code-only. It does not contain account pool data, cached usage, local config, or virtualenv files.
 
+The Rust binary is now the only maintained distribution target. The legacy Python implementation remains in the repository as a migration reference and is no longer the install path or the maintained runtime.
+
+If you do not like or are not used to the command line, try the more feature-rich GUI version: <https://github.com/murongg/ai-accounts-hub>
+
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lauzhihao/scodex/main/install.sh | bash
 ```
 
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/lauzhihao/scodex/main/install.ps1 | iex
+```
+
+Current prebuilt release targets:
+
+- Linux: `x86_64-unknown-linux-musl`
+- macOS: `x86_64-apple-darwin`, `aarch64-apple-darwin`
+- Windows: `x86_64-pc-windows-msvc`
+
 The installer:
 
-- downloads `codex-autoswitch.py` into the local state directory
-- creates `~/.local/bin/scodex` as the primary command
-- keeps a legacy `auto-codex` wrapper for compatibility
+- downloads a prebuilt Rust release binary from GitHub Releases
+- installs `scodex` as the primary command
+- keeps `auto-codex` as a compatibility command
+- installs `scodex-original` as a thin passthrough helper to the underlying `codex`
 - imports `~/.codex/auth.json` into local state when it exists
 - refreshes usage cache after import when the usage API is reachable
-- adds or updates a managed `alias scodex-original="..."` block in `~/.zshrc` and/or `~/.bashrc`
-- does not alias `codex`, so the official Codex CLI command remains untouched
 
 ## Requirements
 
-- `bash`
-- `curl`
-- `python3`
 - `codex`
+- Unix installer: `bash`, `curl`, `tar`
+- Windows installer: PowerShell 5+ or PowerShell 7+
+
+Build from source:
+
+```bash
+cargo build --release
+```
 
 ## Entrypoints
 
 - `scodex`: primary command
 - `auto-codex`: legacy compatibility wrapper
-- `scodex-original`: alias to the underlying Codex CLI binary
-- `codex`: the official Codex CLI command, left unchanged by the installer
+- `scodex-original`: passthrough helper to the underlying Codex CLI binary
+- `codex`: the official Codex CLI command, left unchanged
 
 ## Command Overview
 
@@ -51,7 +71,7 @@ Use `scodex` as the default command. The legacy `auto-codex` wrapper is kept onl
 | `scodex refresh` | Refresh live usage for all known accounts and print the latest results |
 | `scodex import-auth <path>` | Import an `auth.json` file or a home directory containing `auth.json` |
 | `scodex import-known` | Import `~/.codex/auth.json`; optionally import AI Accounts Hub managed homes |
-| `scodex update` | Update `scodex` from its configured install source |
+| `scodex update` | Download the latest matching Rust release asset from GitHub Releases and replace the installed binary (`upgrade` is an alias) |
 
 ## Supported Options
 
@@ -116,8 +136,7 @@ scodex refresh
 
 - calls the live usage API for all known accounts
 - prints the refreshed account list immediately after the API calls finish
-- refresh uses up to 8 parallel workers by default
-- override worker count with `AUTO_CODEX_REFRESH_WORKERS`
+- the current Rust release refreshes sequentially
 
 ### `import-auth`
 
@@ -143,11 +162,14 @@ AUTO_CODEX_IMPORT_ACCOUNTS_HUB=1 scodex import-known
 ### `update`
 
 ```bash
-scodex update [--yes]
+scodex update [-f|--force]
+scodex upgrade [-f|--force]
 ```
 
-- updates the installed script and wrappers from the configured raw GitHub source
-- `--yes`: skip installer confirmation prompts if they are added back in future revisions
+- downloads the latest matching GitHub Releases asset for the current platform and replaces the installed binary
+- `update` remains the primary command for compatibility with the historical Python implementation
+- `upgrade` is a compatible alias for users who prefer that wording
+- `-f`, `--force`: force reinstall even when the current version already matches the latest release tag
 
 ## Passthrough Behavior
 
@@ -175,3 +197,9 @@ Before pushing:
 1. Run `rg -n 'access_token|refresh_token|id_token|OPENAI_API_KEY|account_id|@qq\\.com|/Users/ncds|/Users/liuzhihao' .`
 2. Confirm `git status --short` only shows code and docs.
 3. Review `git diff --cached` before pushing.
+
+## Release Notes
+
+- CI now targets the Rust implementation only.
+- Tagged releases `v*` publish prebuilt binaries through GitHub Actions.
+- The Python files in this repository are legacy reference code and are no longer maintained.

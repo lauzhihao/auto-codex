@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Legacy reference implementation. Rust release line is the maintained runtime.
 from __future__ import annotations
 
 import argparse

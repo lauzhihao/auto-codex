@@ -6,34 +6,54 @@
 
 这个仓库只包含代码，不包含账号池数据、额度缓存、本地配置或虚拟环境文件。
 
+现在只有 Rust 二进制发行线仍在维护。仓库里保留的 Python 实现只作为迁移参考，不再作为安装路径，也不再继续维护。
+
+如果你不喜欢或不习惯使用命令行，可以体验功能更丰富的 GUI 版本：<https://github.com/murongg/ai-accounts-hub>
+
 ## 安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lauzhihao/scodex/main/install.sh | bash
 ```
 
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/lauzhihao/scodex/main/install.ps1 | iex
+```
+
+当前预编译发行目标：
+
+- Linux：`x86_64-unknown-linux-musl`
+- macOS：`x86_64-apple-darwin`、`aarch64-apple-darwin`
+- Windows：`x86_64-pc-windows-msvc`
+
 安装脚本会：
 
-- 下载 `codex-autoswitch.py` 到本地状态目录
-- 创建 `~/.local/bin/scodex` 作为主命令
-- 保留旧的 `auto-codex` wrapper 作为兼容入口
+- 从 GitHub Releases 下载预编译的 Rust 二进制
+- 安装 `scodex` 作为主命令
+- 保留 `auto-codex` 作为兼容入口
+- 安装 `scodex-original` 作为到底层 `codex` 的透传辅助命令
 - 在存在 `~/.codex/auth.json` 时导入到本地状态
 - 在额度接口可用时刷新使用量缓存
-- 在 `~/.zshrc` 和/或 `~/.bashrc` 中写入或更新托管的 `alias scodex-original="..."` 配置块
-- 不会给 `codex` 写别名，因此官方 Codex CLI 命令保持不变
 
 ## 依赖
 
-- `bash`
-- `curl`
-- `python3`
 - `codex`
+- Unix 安装器：`bash`、`curl`、`tar`
+- Windows 安装器：PowerShell 5+ 或 PowerShell 7+
+
+源码构建：
+
+```bash
+cargo build --release
+```
 
 ## 入口命令
 
 - `scodex`：主命令
 - `auto-codex`：历史兼容 wrapper
-- `scodex-original`：底层官方 Codex CLI 二进制的别名
+- `scodex-original`：到底层官方 Codex CLI 的透传辅助命令
 - `codex`：官方 Codex CLI 命令，安装器不会接管
 
 ## 命令总览
@@ -51,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/lauzhihao/scodex/main/install.sh | 
 | `scodex refresh` | 刷新所有已知账号的实时额度，并直接打印最新结果 |
 | `scodex import-auth <path>` | 导入一个 `auth.json` 文件，或包含 `auth.json` 的目录 |
 | `scodex import-known` | 导入 `~/.codex/auth.json`；可选导入 AI Accounts Hub 管理的账号 |
-| `scodex update` | 从配置的安装源更新 `scodex` |
+| `scodex update` | 从 GitHub Releases 下载当前平台匹配的 Rust 发行资产并替换已安装二进制（`upgrade` 为兼容别名） |
 
 ## 支持的参数
 
@@ -116,8 +136,7 @@ scodex refresh
 
 - 会对所有已知账号调用实时额度接口
 - 刷新完成后会立刻打印最新账号列表
-- 默认最多使用 8 个并行 worker
-- 可以通过 `AUTO_CODEX_REFRESH_WORKERS` 覆盖并发数
+- 当前 Rust 发行版仍按顺序刷新账号额度
 
 ### `import-auth`
 
@@ -143,11 +162,14 @@ AUTO_CODEX_IMPORT_ACCOUNTS_HUB=1 scodex import-known
 ### `update`
 
 ```bash
-scodex update [--yes]
+scodex update [-f|--force]
+scodex upgrade [-f|--force]
 ```
 
-- 从配置的 GitHub raw 安装源更新脚本和 wrapper
-- `--yes`：如果未来版本重新加入确认流程，可跳过确认
+- 会从 GitHub Releases 下载当前平台匹配的最新发行资产并替换已安装二进制
+- `update` 仍然是主命令，用来兼容历史 Python 版本用户
+- `upgrade` 是等价别名，给更偏好这个命名的用户使用
+- `-f`、`--force`：即使当前版本已经等于最新 tag，也强制重新安装一次
 
 ## 透传行为
 
@@ -175,3 +197,9 @@ scodex exec "fix failing test"
 1. 执行 `rg -n 'access_token|refresh_token|id_token|OPENAI_API_KEY|account_id|@qq\\.com|/Users/ncds|/Users/liuzhihao' .`
 2. 确认 `git status --short` 里只有代码和文档改动
 3. 在推送前检查 `git diff --cached`
+
+## 发布说明
+
+- CI 现在只维护 Rust 实现。
+- `v*` 标签会通过 GitHub Actions 发布预编译二进制。
+- 仓库中的 Python 文件已降级为 legacy 参考代码，不再继续维护。

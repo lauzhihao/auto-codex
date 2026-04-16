@@ -1,3 +1,4 @@
+# Legacy reference tests for the deprecated Python implementation.
 import argparse
 import base64
 import contextlib

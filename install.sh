@@ -1,278 +1,150 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RAW_BASE="${AUTO_CODEX_RAW_BASE:-https://raw.githubusercontent.com/lauzhihao/scodex/main}"
-INSTALL_BIN="${HOME}/.local/bin"
-INSTALL_HOME="${HOME}/.local/share/auto-codex"
-SCRIPT_URL="${RAW_BASE}/codex-autoswitch.py"
-SCRIPT_PATH="${INSTALL_HOME}/codex-autoswitch.py"
+REPO="${AUTO_CODEX_REPO:-lauzhihao/scodex}"
+INSTALL_BIN="${INSTALL_BIN:-$HOME/.local/bin}"
 WRAPPER_PATH="${INSTALL_BIN}/scodex"
 COMPAT_WRAPPER_PATH="${INSTALL_BIN}/auto-codex"
-BEGIN_MARKER="# >>> auto-codex >>>"
-END_MARKER="# <<< auto-codex <<<"
-
-if [[ "${RAW_BASE}" == *"<your-name>"* || "${RAW_BASE}" == *"<repo>"* ]]; then
-  echo "Replace the placeholder GitHub repo in install.sh before publishing, or set AUTO_CODEX_RAW_BASE." >&2
-  exit 1
-fi
+ORIGINAL_WRAPPER_PATH="${INSTALL_BIN}/scodex-original"
+VERSION="${AUTO_CODEX_VERSION:-}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-detect_platform() {
-  local os arch
-  os="$(uname -s 2>/dev/null || echo unknown)"
-  arch="$(uname -m 2>/dev/null || echo unknown)"
-  printf '%s/%s' "${os}" "${arch}"
-}
-
-show_runtime_environment() {
-  local shell_name
-  shell_name="$(basename "${SHELL:-unknown}")"
-  cat <<EOF
-Runtime environment:
-  platform: $(detect_platform)
-  shell: ${shell_name}
-  home: ${HOME}
-  raw base: ${RAW_BASE}
-EOF
-}
-
-print_install_hint() {
-  local cmd="$1"
-  local os
-  os="$(uname -s 2>/dev/null || echo unknown)"
-
-  case "${cmd}" in
-    bash)
-      case "${os}" in
-        Darwin)
-          echo "    install hint: bash is expected to exist on macOS. Verify /bin/bash is available."
-          ;;
-        Linux)
-          echo "    install hint: ubuntu/debian: sudo apt-get update && sudo apt-get install -y bash"
-          echo "    install hint: centos/rhel: sudo yum install -y bash"
-          ;;
-      esac
-      ;;
-    curl)
-      case "${os}" in
-        Darwin)
-          echo "    install hint: curl is expected to exist on macOS. Verify /usr/bin/curl is available."
-          ;;
-        Linux)
-          echo "    install hint: ubuntu/debian: sudo apt-get update && sudo apt-get install -y curl"
-          echo "    install hint: centos/rhel: sudo yum install -y curl"
-          ;;
-      esac
-      ;;
-    python3)
-      case "${os}" in
-        Darwin)
-          echo "    install hint: brew install python"
-          ;;
-        Linux)
-          echo "    install hint: ubuntu/debian: sudo apt-get update && sudo apt-get install -y python3"
-          echo "    install hint: centos/rhel: sudo yum install -y python3"
-          ;;
-      esac
-      ;;
-    codex)
-      case "${os}" in
-        Darwin)
-          echo "    install hint: install Node.js first, then npm install -g @openai/codex"
-          echo "    install hint: Homebrew Node.js: brew install node"
-          ;;
-        Linux)
-          echo "    install hint: install Node.js first, then npm install -g @openai/codex"
-          echo "    install hint: ubuntu/debian Node.js example: sudo apt-get update && sudo apt-get install -y nodejs npm"
-          ;;
-      esac
-      ;;
-  esac
-}
-
-show_plan() {
-  cat <<EOF
-scodex install plan
-
-The script will perform these actions:
-1. Check runtime environment and required commands: bash, curl, python3, codex.
-2. Download:
-   curl -fsSL ${SCRIPT_URL}
-3. Install files:
-   - ${SCRIPT_PATH}
-   - ${WRAPPER_PATH}
-   - ${COMPAT_WRAPPER_PATH} (compatibility command)
-4. Update managed shell config blocks in:
-$(select_rc_files | sed 's/^/   - /')
-5. If ${HOME}/.codex/auth.json exists:
-   - ${WRAPPER_PATH} import-known
-   - ${WRAPPER_PATH} refresh
-
-The script will not modify ${HOME}/.codex/auth.json.
-EOF
-}
-
 show_requirements() {
   local missing=0
   local cmd
-  show_runtime_environment
   echo "Dependency check:"
-  for cmd in bash curl python3 codex; do
+  for cmd in bash curl tar mktemp; do
     if need_cmd "${cmd}"; then
       printf '  [ok] %s -> %s\n' "${cmd}" "$(command -v "${cmd}")"
     else
       printf '  [missing] %s\n' "${cmd}" >&2
-      print_install_hint "${cmd}" >&2
       missing=1
     fi
   done
   if [[ "${missing}" -ne 0 ]]; then
-    echo "Install aborted because required commands are missing. Install them first, then re-run this script." >&2
+    echo "Install aborted because required commands are missing." >&2
     exit 1
   fi
 }
 
-REAL_CODEX_BIN=""
+detect_target() {
+  local os arch
+  os="$(uname -s 2>/dev/null || echo unknown)"
+  arch="$(uname -m 2>/dev/null || echo unknown)"
 
-render_shell_block() {
-  cat <<EOF
-${BEGIN_MARKER}
-export PATH="\$HOME/.local/bin:\$PATH"
-alias scodex-original='${REAL_CODEX_BIN}'
-${END_MARKER}
-EOF
+  case "${os}/${arch}" in
+    Darwin/arm64|Darwin/aarch64)
+      echo "aarch64-apple-darwin"
+      ;;
+    Darwin/x86_64)
+      echo "x86_64-apple-darwin"
+      ;;
+    Linux/x86_64|Linux/amd64)
+      echo "x86_64-unknown-linux-musl"
+      ;;
+    *)
+      echo "Unsupported platform: ${os}/${arch}" >&2
+      echo "Use a published release asset manually or build from source with cargo." >&2
+      exit 1
+      ;;
+  esac
 }
 
-upsert_shell_block() {
-  local rc_file="$1"
-  local status
-
-  mkdir -p "$(dirname "${rc_file}")"
-  touch "${rc_file}"
-
-  status="$(
-    python3 - "${rc_file}" "${BEGIN_MARKER}" "${END_MARKER}" "$(render_shell_block)" <<'PY'
-from pathlib import Path
-import sys
-
-rc_path = Path(sys.argv[1])
-begin = sys.argv[2]
-end = sys.argv[3]
-block = sys.argv[4].rstrip("\n")
-
-text = rc_path.read_text(encoding="utf-8")
-start = text.find(begin)
-if start == -1:
-    if text and not text.endswith("\n"):
-        text += "\n"
-    if text and not text.endswith("\n\n"):
-        text += "\n"
-    text += block + "\n"
-    rc_path.write_text(text, encoding="utf-8")
-    print("added")
-    raise SystemExit(0)
-
-finish = text.find(end, start)
-if finish == -1:
-    raise SystemExit(f"Managed block start found in {rc_path}, but end marker is missing.")
-
-finish += len(end)
-updated = text[:start].rstrip("\n") + "\n" + block + text[finish:]
-if updated.startswith("\n"):
-    updated = updated[1:]
-if updated == text:
-    print("unchanged")
-else:
-    rc_path.write_text(updated, encoding="utf-8")
-    print("updated")
-PY
-  )"
-  printf '  shell config %s: %s\n' "${status}" "${rc_file}"
-}
-
-select_rc_files() {
-  local shell_name
-  shell_name="$(basename "${SHELL:-}")"
-
-  if [[ -f "${HOME}/.zshrc" || "${shell_name}" == "zsh" ]]; then
-    printf '%s\n' "${HOME}/.zshrc"
+resolve_version() {
+  if [[ -n "${VERSION}" ]]; then
+    echo "${VERSION}"
+    return 0
   fi
-  if [[ -f "${HOME}/.bashrc" || "${shell_name}" == "bash" ]]; then
-    printf '%s\n' "${HOME}/.bashrc"
+
+  local api_url
+  api_url="https://api.github.com/repos/${REPO}/releases/latest"
+  VERSION="$(
+    curl -fsSL "${api_url}" \
+      | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+      | head -n 1
+  )"
+  if [[ -z "${VERSION}" ]]; then
+    echo "Failed to resolve latest release tag from ${api_url}" >&2
+    exit 1
+  fi
+  echo "${VERSION}"
+}
+
+download_and_install() {
+  local version target asset url tmp_dir archive_path extracted_path
+  version="$1"
+  target="$2"
+  asset="scodex-${version}-${target}.tar.gz"
+  url="https://github.com/${REPO}/releases/download/${version}/${asset}"
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/scodex-install.XXXXXX")"
+  trap 'rm -rf "${tmp_dir}"' EXIT
+  archive_path="${tmp_dir}/${asset}"
+
+  echo "Downloading ${url}"
+  curl -fsSL "${url}" -o "${archive_path}"
+
+  mkdir -p "${INSTALL_BIN}"
+  tar -xzf "${archive_path}" -C "${tmp_dir}"
+  extracted_path="${tmp_dir}/scodex"
+  if [[ ! -f "${extracted_path}" ]]; then
+    echo "Release archive did not contain a top-level scodex binary." >&2
+    exit 1
+  fi
+
+  install -m 0755 "${extracted_path}" "${WRAPPER_PATH}"
+  cp "${WRAPPER_PATH}" "${COMPAT_WRAPPER_PATH}"
+}
+
+install_original_wrapper() {
+  cat > "${ORIGINAL_WRAPPER_PATH}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v codex >/dev/null 2>&1; then
+  exec "$(command -v codex)" "$@"
+fi
+echo "codex not found on PATH." >&2
+exit 1
+EOF
+  chmod 0755 "${ORIGINAL_WRAPPER_PATH}"
+}
+
+post_install_import() {
+  if [[ -f "${HOME}/.codex/auth.json" ]]; then
+    if "${WRAPPER_PATH}" import-known >/dev/null 2>&1; then
+      echo "Imported ${HOME}/.codex/auth.json into scodex state."
+      if "${WRAPPER_PATH}" refresh >/dev/null 2>&1; then
+        echo "Refreshed scodex usage cache."
+      else
+        echo "Imported auth.json, but refreshing usage cache failed." >&2
+      fi
+    else
+      echo "Installed scodex, but importing ${HOME}/.codex/auth.json failed." >&2
+    fi
+  else
+    echo "No ${HOME}/.codex/auth.json found; skipped import."
+  fi
+}
+
+print_next_steps() {
+  echo "Installed to ${WRAPPER_PATH}"
+  echo "Installed compatibility command to ${COMPAT_WRAPPER_PATH}"
+  echo "Installed passthrough helper to ${ORIGINAL_WRAPPER_PATH}"
+  if [[ ":$PATH:" != *":${INSTALL_BIN}:"* ]]; then
+    echo
+    echo "${INSTALL_BIN} is not currently on PATH."
+    echo "Add this line to your shell profile:"
+    echo "  export PATH=\"${INSTALL_BIN}:\$PATH\""
   fi
 }
 
 show_requirements
-REAL_CODEX_BIN="$(command -v codex)"
-show_plan
+TARGET="$(detect_target)"
+VERSION="$(resolve_version)"
+download_and_install "${VERSION}" "${TARGET}"
+install_original_wrapper
+post_install_import
+print_next_steps
 
-mkdir -p "${INSTALL_BIN}" "${INSTALL_HOME}"
-
-tmp_script="$(mktemp "${TMPDIR:-/tmp}/auto-codex.XXXXXX.py")"
-trap 'rm -f "${tmp_script}"' EXIT
-
-curl -fsSL "${SCRIPT_URL}" -o "${tmp_script}"
-install -m 0755 "${tmp_script}" "${SCRIPT_PATH}"
-
-cat > "${WRAPPER_PATH}" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-export AUTO_CODEX_HOME="${HOME}/.local/share/auto-codex"
-export AUTO_CODEX_PROG="scodex"
-export AUTO_CODEX_RAW_BASE="__AUTO_CODEX_RAW_BASE__"
-exec python3 "${AUTO_CODEX_HOME}/codex-autoswitch.py" "$@"
-EOF
-
-cat > "${COMPAT_WRAPPER_PATH}" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-export AUTO_CODEX_HOME="${HOME}/.local/share/auto-codex"
-export AUTO_CODEX_PROG="auto-codex"
-export AUTO_CODEX_RAW_BASE="__AUTO_CODEX_RAW_BASE__"
-exec python3 "${AUTO_CODEX_HOME}/codex-autoswitch.py" "$@"
-EOF
-
-python3 - "${WRAPPER_PATH}" "${COMPAT_WRAPPER_PATH}" "${RAW_BASE}" <<'PY'
-from pathlib import Path
-import sys
-
-wrapper_path = Path(sys.argv[1])
-compat_wrapper_path = Path(sys.argv[2])
-raw_base = sys.argv[3]
-for path in (wrapper_path, compat_wrapper_path):
-    text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("__AUTO_CODEX_RAW_BASE__", raw_base), encoding="utf-8")
-PY
-
-chmod 0755 "${WRAPPER_PATH}"
-chmod 0755 "${COMPAT_WRAPPER_PATH}"
-
-while IFS= read -r rc_file; do
-  [[ -n "${rc_file}" ]] || continue
-  upsert_shell_block "${rc_file}"
-done < <(select_rc_files)
-
-if [[ -f "${HOME}/.codex/auth.json" ]]; then
-  if "${WRAPPER_PATH}" import-known >/dev/null; then
-    echo "Imported ${HOME}/.codex/auth.json into scodex state."
-    if "${WRAPPER_PATH}" refresh >/dev/null; then
-      echo "Refreshed scodex usage cache."
-    else
-      echo "Imported ${HOME}/.codex/auth.json, but refreshing usage cache failed." >&2
-    fi
-  else
-    echo "Install succeeded, but importing ${HOME}/.codex/auth.json failed." >&2
-  fi
-else
-  echo "No ${HOME}/.codex/auth.json found; skipped import."
-fi
-
-echo "Installed to ${WRAPPER_PATH}"
-echo "Installed compatibility command to ${COMPAT_WRAPPER_PATH}"
-echo "Added shell aliases in ~/.zshrc and/or ~/.bashrc:"
-echo "  scodex-original -> ${REAL_CODEX_BIN}"
-echo "Use \`scodex\` as the primary command. \`auto-codex\` remains available for compatibility."
-echo "The installer does not alias \`codex\`; use \`scodex-original\` for the underlying Codex CLI."

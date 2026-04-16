@@ -1,7 +1,2 @@
-.DS_Store
-.venv/
-__pycache__/
-*.log
-*.pyc
-accounts/
-state.json
+/target
+

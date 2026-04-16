@@ -1,0 +1,21 @@
+[package]
+name = "scodex"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Cross-platform account-aware launcher for agent CLIs."
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5", features = ["derive"] }
+directories = "6.0"
+flate2 = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+self-replace = "1.5"
+tar = "0.4"
+uuid = { version = "1.18", features = ["v4"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
