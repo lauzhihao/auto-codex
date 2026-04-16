@@ -109,6 +109,64 @@ class CodexAutoswitchTest(unittest.TestCase):
         self.assertIsNotNone(best)
         self.assertEqual(best["id"], "five-heavy")
 
+    def test_cmd_use_switches_to_exact_email_case_insensitively(self) -> None:
+        state = {
+            "version": 1,
+            "accounts": [
+                {"id": "a", "email": "lauzhihao@qq.com", "updated_at": 1},
+            ],
+            "usage_cache": {
+                "a": {
+                    "weekly_remaining_percent": 60,
+                    "five_hour_remaining_percent": 80,
+                }
+            },
+        }
+        original_import_known = autoswitch.import_known_sources
+        original_switch = autoswitch.switch_account
+        switched: list[dict] = []
+        output = io.StringIO()
+
+        autoswitch.import_known_sources = lambda state_dir, current_state: []
+        autoswitch.switch_account = lambda account: switched.append(account)
+        try:
+            with contextlib.redirect_stdout(output):
+                rc = autoswitch.cmd_use(
+                    argparse.Namespace(email="LauZhiHao@qq.com"),
+                    Path("/tmp/state"),
+                    state,
+                )
+        finally:
+            autoswitch.import_known_sources = original_import_known
+            autoswitch.switch_account = original_switch
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(switched), 1)
+        self.assertEqual(switched[0]["email"], "lauzhihao@qq.com")
+        self.assertIn("Switched to lauzhihao@qq.com [weekly=60%, 5h=80%]", output.getvalue())
+
+    def test_cmd_use_returns_error_for_unknown_email(self) -> None:
+        state = {"version": 1, "accounts": [], "usage_cache": {}}
+        original_import_known = autoswitch.import_known_sources
+        original_switch = autoswitch.switch_account
+        output = io.StringIO()
+
+        autoswitch.import_known_sources = lambda state_dir, current_state: []
+        autoswitch.switch_account = lambda account: (_ for _ in ()).throw(AssertionError("should not switch"))
+        try:
+            with contextlib.redirect_stdout(output):
+                rc = autoswitch.cmd_use(
+                    argparse.Namespace(email="missing@example.com"),
+                    Path("/tmp/state"),
+                    state,
+                )
+        finally:
+            autoswitch.import_known_sources = original_import_known
+            autoswitch.switch_account = original_switch
+
+        self.assertEqual(rc, 1)
+        self.assertIn("Unknown account: missing@example.com", output.getvalue())
+
     def test_import_known_sources_skips_ai_accounts_hub_homes_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_home = Path(tmp_dir)

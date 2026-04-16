@@ -46,6 +46,7 @@ Use `scodex` as the default command. The legacy `auto-codex` wrapper is kept onl
 | `scodex launch` | Explicit form of the default behavior |
 | `scodex auto` | Refresh usage, pick the best account, and switch without launching Codex |
 | `scodex login` | Add one account via `codex login --device-auth` |
+| `scodex use <email>` | Switch directly to a known account by email |
 | `scodex list` | Refresh live usage, then show the latest account quotas |
 | `scodex refresh` | Refresh live usage for all known accounts and print the latest results |
 | `scodex import-auth <path>` | Import an `auth.json` file or a home directory containing `auth.json` |
@@ -88,6 +89,15 @@ scodex login [--switch]
 ```
 
 - `--switch`: switch to the newly added account after login
+
+### `use`
+
+```bash
+scodex use <email>
+```
+
+- switches directly to the known account whose email matches `<email>` case-insensitively
+- example: `scodex use lauzhihao@qq.com`
 
 ### `list`
 

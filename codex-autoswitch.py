@@ -25,7 +25,7 @@ DEFAULT_STATE_BASENAME = "auto-codex"
 LEGACY_STATE_BASENAME = "codex-autoswitch"
 DEFAULT_INSTALL_BASE_URL = "https://raw.githubusercontent.com/lauzhihao/scodex/main"
 DEFAULT_PROGRAM_NAME = "scodex"
-KNOWN_COMMANDS = {"launch", "auto", "login", "list", "refresh", "update", "import-auth", "import-known"}
+KNOWN_COMMANDS = {"launch", "auto", "login", "use", "list", "refresh", "update", "import-auth", "import-known"}
 
 
 def main() -> int:
@@ -43,6 +43,8 @@ def main() -> int:
         return cmd_auto(args, state_dir, state)
     if args.command == "login":
         return cmd_login(args, state_dir, state)
+    if args.command == "use":
+        return cmd_use(args, state_dir, state)
     if args.command == "list":
         return cmd_list(args, state_dir, state)
     if args.command == "refresh":
@@ -150,6 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Switch to the new account after login succeeds.",
     )
+
+    use = subparsers.add_parser("use", help="Switch to a known account by email.")
+    use.add_argument("email", help="Email address of the account to switch to.")
 
     subparsers.add_parser("list", help="Refresh usage, then list known accounts.")
     subparsers.add_parser("refresh", help="Refresh usage for all known accounts and print the latest results.")
@@ -351,6 +356,14 @@ def find_matching_account(state: dict, email: str, account_id: str | None) -> di
     return None
 
 
+def find_account_by_email(state: dict, email: str) -> dict | None:
+    target = email.strip().lower()
+    for account in state["accounts"]:
+        if account["email"].lower() == target:
+            return account
+    return None
+
+
 def replace_account(state: dict, updated: dict) -> None:
     for idx, account in enumerate(state["accounts"]):
         if account["id"] == updated["id"]:
@@ -441,6 +454,18 @@ def cmd_login(args: argparse.Namespace, state_dir: Path, state: dict) -> int:
     if args.switch:
         switch_account(record)
         print_selection(record, usage, prefix="Switched to")
+    return 0
+
+
+def cmd_use(args: argparse.Namespace, state_dir: Path, state: dict) -> int:
+    import_known_sources(state_dir, state)
+    record = find_account_by_email(state, args.email)
+    if record is None:
+        print(f"Unknown account: {args.email}")
+        return 1
+    switch_account(record)
+    usage = state["usage_cache"].get(record["id"], {})
+    print_selection(record, usage, prefix="Switched to")
     return 0
 
 

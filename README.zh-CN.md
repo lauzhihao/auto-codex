@@ -46,6 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/lauzhihao/scodex/main/install.sh | 
 | `scodex launch` | 默认行为的显式写法 |
 | `scodex auto` | 刷新额度并切换最佳账号，但不启动 Codex |
 | `scodex login` | 通过 `codex login --device-auth` 添加一个账号 |
+| `scodex use <email>` | 按邮箱直接切换到一个已知账号 |
 | `scodex list` | 先刷新实时额度，再显示最新账号额度 |
 | `scodex refresh` | 刷新所有已知账号的实时额度，并直接打印最新结果 |
 | `scodex import-auth <path>` | 导入一个 `auth.json` 文件，或包含 `auth.json` 的目录 |
@@ -88,6 +89,15 @@ scodex login [--switch]
 ```
 
 - `--switch`：登录完成后立即切换到新账号
+
+### `use`
+
+```bash
+scodex use <email>
+```
+
+- 会按邮箱大小写不敏感精确匹配已知账号，并直接切换过去
+- 示例：`scodex use lauzhihao@qq.com`
 
 ### `list`
 
