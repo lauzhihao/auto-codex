@@ -522,7 +522,11 @@ def render_account_table(accounts: list[dict], usage_cache: dict, active: dict |
             format_reset_on(usage.get("weekly_refresh_at")),
             format_account_status(usage),
         ])
-    return render_ascii_table(["Active", "Email", "Plan", "5h", "Weekly", "ResetOn", "Status"], rows)
+    return render_ascii_table(
+        ["Active", "Email", "Plan", "5h", "Weekly", "ResetOn", "Status"],
+        rows,
+        aligns=["center", "left", "center", "center", "center", "center", "center"],
+    )
 
 
 def format_account_status(usage: dict) -> str:
@@ -543,15 +547,36 @@ def active_account_marker() -> str:
     return marker
 
 
-def render_ascii_table(headers: list[str], rows: list[list[str]]) -> str:
+def render_ascii_table(
+    headers: list[str],
+    rows: list[list[str]],
+    aligns: list[str] | None = None,
+) -> str:
+    if aligns is None:
+        aligns = ["left"] * len(headers)
+    if len(aligns) != len(headers):
+        raise ValueError("aligns must match headers length")
+
     widths = [
-        max(len(str(header)), *(len(str(row[idx])) for row in rows))
+        max([len(str(header)), *(len(str(row[idx])) for row in rows)])
         for idx, header in enumerate(headers)
     ]
     border = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
 
+    def align_cell(value: str, width: int, align: str) -> str:
+        if align == "left":
+            return value.ljust(width)
+        if align == "right":
+            return value.rjust(width)
+        if align == "center":
+            return value.center(width)
+        raise ValueError(f"unsupported alignment: {align}")
+
     def render_row(values: list[str]) -> str:
-        cells = [str(value).ljust(widths[idx]) for idx, value in enumerate(values)]
+        cells = [
+            align_cell(str(value), widths[idx], aligns[idx])
+            for idx, value in enumerate(values)
+        ]
         return "| " + " | ".join(cells) + " |"
 
     lines = [border, render_row(headers), border]

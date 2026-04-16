@@ -48,6 +48,40 @@ def write_auth(path: Path, email: str, account_id: str) -> None:
 
 
 class CodexAutoswitchTest(unittest.TestCase):
+    def test_render_account_table_centers_non_email_columns(self) -> None:
+        accounts = [
+            {"id": "a", "email": "a@example.com", "updated_at": 1, "plan": "Plus"},
+            {"id": "b", "email": "longer@example.com", "updated_at": 1, "plan": "Pro"},
+        ]
+        usage_cache = {
+            "a": {
+                "weekly_remaining_percent": 80,
+                "five_hour_remaining_percent": 90,
+                "weekly_refresh_at": "2026-04-20T00:00:00Z",
+            },
+            "b": {
+                "weekly_remaining_percent": 3,
+                "five_hour_remaining_percent": 7,
+                "weekly_refresh_at": "2026-04-21T00:00:00Z",
+                "needs_relogin": True,
+            },
+        }
+
+        rendered = autoswitch.render_account_table(
+            accounts,
+            usage_cache,
+            {"email": "a@example.com"},
+        )
+
+        self.assertIn(
+            "|   \u2713    | a@example.com      | Plus | 90% |  80%   | 04-20 08:00 |    OK   |",
+            rendered,
+        )
+        self.assertIn(
+            "|        | longer@example.com | Pro  |  7% |   3%   | 04-21 08:00 | RELOGIN |",
+            rendered,
+        )
+
     def test_choose_best_account_prefers_five_hour_quota(self) -> None:
         state = {
             "accounts": [
@@ -232,7 +266,10 @@ class CodexAutoswitchTest(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, ["refresh", "save"])
-        self.assertIn("weekly=80% 5h=90%", output.getvalue())
+        self.assertIn(
+            "|        | a@example.com | Plus | 90% |  80%   |   N/A   |   OK   |",
+            output.getvalue(),
+        )
 
     def test_cmd_refresh_prints_latest_usage_after_refresh(self) -> None:
         state = {
@@ -268,7 +305,10 @@ class CodexAutoswitchTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         rendered = output.getvalue()
         self.assertIn("Refreshed 1 account(s).", rendered)
-        self.assertIn("weekly=70% 5h=85%", rendered)
+        self.assertIn(
+            "|        | a@example.com | Plus | 85% |  70%   |   N/A   |   OK   |",
+            rendered,
+        )
 
 
 if __name__ == "__main__":
