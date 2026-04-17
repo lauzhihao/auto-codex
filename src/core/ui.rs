@@ -319,6 +319,16 @@ impl Messages {
         }
     }
 
+    pub fn codex_install_tool_missing(&self, tool: &str) -> String {
+        if self.is_zh() {
+            format!("未找到 {tool}。要自动安装 Codex CLI，当前机器需要先安装 Node.js/npm。")
+        } else {
+            format!(
+                "{tool} not found. Install Node.js/npm first before trying to install Codex CLI automatically."
+            )
+        }
+    }
+
     pub fn codex_login_failed(&self, status: i32) -> String {
         if self.is_zh() {
             format!("codex 登录失败，退出码：{status}")

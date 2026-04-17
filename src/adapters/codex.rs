@@ -496,6 +496,15 @@ impl CodexAdapter {
         eprintln!("{install_line}");
         eprintln!();
 
+        let Some(installer_bin) = find_in_path(&install.program) else {
+            eprintln!("{}", ui.codex_install_tool_missing(&install.program));
+            eprintln!();
+            eprintln!("{}", ui.manual_install());
+            eprintln!();
+            eprintln!("{install_line}");
+            std::process::exit(1);
+        };
+
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             eprintln!("{}", ui.manual_install());
             std::process::exit(1);
@@ -512,7 +521,7 @@ impl CodexAdapter {
 
             match parse_yes_no(&answer) {
                 Some(true) => {
-                    let status = Command::new(&install.program)
+                    let status = Command::new(&installer_bin)
                         .args(&install.args)
                         .status()
                         .with_context(|| format!("failed to execute `{install_line}`"))?;
@@ -1830,6 +1839,7 @@ mod tests {
     #[test]
     fn install_command_uses_official_npm_package() {
         let command = codex_install_command();
+        assert!(command.program == "npm" || command.program == "npm.cmd");
         assert_eq!(command.args, vec!["install", "-g", "@openai/codex"]);
     }
 
