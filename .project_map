@@ -1,0 +1,59 @@
+# scodex (auto-codex-open) Project Map
+> Generated: 2026年 4月17日 星期五 18时20分24秒 CST
+> Strategy: Source Focused (src expanded, target collapsed)
+
+## Package
+
+- name: scodex
+- version: 0.1.7
+- edition: 2024
+- description: Cross-platform account-aware launcher for agent CLIs.
+- dependencies (14): anyhow, base64, chrono, clap, directories, flate2, reqwest, serde, serde_json, self-replace, tar, unicode-width, uuid, zip
+
+## Rust Modules
+
+- crate root: cli, main
+- adapters: mod
+- adapters::codex: account, auth, deploy, mod, paths, ui, usage
+- core: mod, policy, state, storage, ui, update
+
+## Directory Structure
+```text
+|-- [D] .github/
+|   -- [D] workflows/
+|       |-- [F] ci.yml
+|       -- [F] release.yml
+|-- [D] scripts/
+|   -- [F] map_project.py
+|-- [D] src/
+|   |-- [D] adapters/
+|   |   |-- [D] codex/
+|   |   |   |-- [F] account.rs
+|   |   |   |-- [F] auth.rs
+|   |   |   |-- [F] deploy.rs
+|   |   |   |-- [F] mod.rs
+|   |   |   |-- [F] paths.rs
+|   |   |   |-- [F] ui.rs
+|   |   |   -- [F] usage.rs
+|   |   -- [F] mod.rs
+|   |-- [D] core/
+|   |   |-- [F] mod.rs
+|   |   |-- [F] policy.rs
+|   |   |-- [F] state.rs
+|   |   |-- [F] storage.rs
+|   |   |-- [F] ui.rs
+|   |   -- [F] update.rs
+|   |-- [F] cli.rs
+|   -- [F] main.rs
+|-- [D] target/  [collapsed: 17184 files]
+|-- [F] 0001-hide-empty-account-table-states.patch
+|-- [F] AGENTS.md
+|-- [F] ARCHITECTURE.md
+|-- [F] Cargo.lock
+|-- [F] Cargo.toml
+|-- [F] CLAUDE.md
+|-- [F] install.ps1
+|-- [F] install.sh
+|-- [F] README.md
+-- [F] README.zh-CN.md
+```
