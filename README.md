@@ -44,6 +44,7 @@ The installer:
 - `codex` is still required at runtime for `launch`, `login`, and passthrough commands
 - when `codex` is missing, `scodex` prompts to install the official CLI with `npm install -g @openai/codex`
 - `deploy` additionally requires `ssh` and `scp`
+- `push` and `pull` additionally require `git` plus `SCODEX_POOL_KEY`
 
 Build from source:
 
@@ -70,6 +71,8 @@ Use `scodex` as the default command. The legacy `auto-codex` wrapper is kept onl
 | `scodex add` | Open the OpenAI signup page when possible, then add one account through device auth |
 | `scodex login` | Add one account via `codex login --device-auth` |
 | `scodex deploy <target>` | Copy the current `~/.codex/auth.json` to a remote machine and path (`sync` is an alias) |
+| `scodex push <repo>` | Push the local account pool into a Git repository subdirectory |
+| `scodex pull <repo>` | Pull an account pool from a Git repository subdirectory into the local state directory |
 | `scodex use <email>` | Switch directly to a known account by email |
 | `scodex list` | Refresh live usage, then show the latest account quotas |
 | `scodex refresh` | Refresh live usage for all known accounts and print the latest results |
@@ -110,10 +113,12 @@ scodex auto [--no-import-known] [--no-login] [--dry-run]
 ### `login`
 
 ```bash
-scodex login [--switch]
+scodex login [--oauth --username <EMAIL> --password <PASS>]
 ```
 
-- `--switch`: switch to the newly added account after login
+- login always switches to the newly added account
+- `--oauth`: use the browser OAuth flow and auto-fill the provided credentials in a controlled Chrome window
+- `--username <EMAIL>` / `--password <PASS>`: required together with `--oauth`
 
 ### `add`
 
@@ -149,6 +154,38 @@ scodex sync [-i <identity_file>] <user@host:/target_path>
 - `-i <identity_file>`: pass an SSH identity file to both `ssh` and `scp`
 - the command prepares the remote directory and then copies the credential file
 - authentication is left to your existing SSH setup; if `ssh` or `scp` asks for a password, enter it yourself
+
+### `push`
+
+```bash
+export SCODEX_POOL_KEY='replace-with-a-long-random-secret'
+scodex push [--path <repo_path>] <repo>
+```
+
+- clones `<repo>` with your existing Git credentials
+- requires `SCODEX_POOL_KEY` in the environment and derives a symmetric encryption key from it
+- exports the local account pool into `.scodex-account-pool/bundle.enc.json` by default
+- the repository only stores the encrypted bundle; account auth files are not committed in plaintext
+- always pushes the current local snapshot as the source of truth; it does not merge remote account-pool history
+- commits and pushes only when the exported bundle changed
+- `--path <repo_path>`: use a different repository subdirectory; it must stay relative and must not contain `..`
+- if `git` is missing, `scodex` prints an install hint instead of trying to install it for you
+- if the repository is private and access fails, `scodex` tells you to check the repo URL plus your Git credentials, SSH key, or PAT
+
+### `pull`
+
+```bash
+export SCODEX_POOL_KEY='replace-with-the-same-secret'
+scodex pull [--path <repo_path>] <repo>
+```
+
+- clones `<repo>` with your existing Git credentials
+- requires the same `SCODEX_POOL_KEY` used during `push`
+- reads the encrypted account pool from `.scodex-account-pool/bundle.enc.json` by default
+- force-overwrites the local account pool with the remote snapshot instead of merging
+- clears old local account homes and resets local usage cache before writing the pulled snapshot
+- if the key is wrong, `pull` fails with a decryption error instead of importing partial data
+- `--path <repo_path>`: read from a different repository subdirectory; it must stay relative and must not contain `..`
 
 ### `list`
 

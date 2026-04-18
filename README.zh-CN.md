@@ -44,6 +44,7 @@ irm https://raw.githubusercontent.com/lauzhihao/scodex/main/install.ps1 | iex
 - `codex` 仍然是 `launch`、`login` 和透传命令的运行时依赖
 - 当缺少 `codex` 时，`scodex` 会提示是否执行官方安装命令 `npm install -g @openai/codex`
 - `deploy` 还依赖 `ssh` 和 `scp`
+- `push` 和 `pull` 还依赖 `git` 以及 `SCODEX_POOL_KEY`
 
 源码构建：
 
@@ -70,6 +71,8 @@ cargo build --release
 | `scodex add` | 尽量自动打开 OpenAI 注册页，然后通过设备登录添加一个账号 |
 | `scodex login` | 通过 `codex login --device-auth` 添加一个账号 |
 | `scodex deploy <target>` | 把当前 `~/.codex/auth.json` 复制到远端机器和路径（`sync` 为别名） |
+| `scodex push <repo>` | 把本地账号池推送到 Git 仓库的指定子目录 |
+| `scodex pull <repo>` | 从 Git 仓库的指定子目录拉取账号池并导入到本地状态目录 |
 | `scodex use <email>` | 按邮箱直接切换到一个已知账号 |
 | `scodex list` | 先刷新实时额度，再显示最新账号额度 |
 | `scodex refresh` | 刷新所有已知账号的实时额度，并直接打印最新结果 |
@@ -110,10 +113,12 @@ scodex auto [--no-import-known] [--no-login] [--dry-run]
 ### `login`
 
 ```bash
-scodex login [--switch]
+scodex login [--oauth --username <EMAIL> --password <PASS>]
 ```
 
-- `--switch`：登录完成后立即切换到新账号
+- 登录完成后会直接切换到新账号
+- `--oauth`：使用浏览器 OAuth 流程，并在受控 Chrome 窗口中自动填充提供的凭据
+- `--username <EMAIL>` / `--password <PASS>`：开启 `--oauth` 时必须同时提供
 
 ### `add`
 
@@ -149,6 +154,38 @@ scodex sync [-i <identity_file>] <user@host:/target_path>
 - `-i <identity_file>`：把 SSH 身份文件同时传给 `ssh` 和 `scp`
 - 命令会先准备远端目录，再复制凭证文件
 - 鉴权仍然沿用你自己的 SSH 配置；如果 `ssh` 或 `scp` 提示输入密码，就由你自己输入
+
+### `push`
+
+```bash
+export SCODEX_POOL_KEY='替换成一段足够长的随机 secret'
+scodex push [--path <repo_path>] <repo>
+```
+
+- 会用你现有的 Git 凭据克隆 `<repo>`
+- 需要先在环境变量里设置 `SCODEX_POOL_KEY`，并基于它派生对称加密密钥
+- 默认把本地账号池导出到 `.scodex-account-pool/bundle.enc.json`
+- 仓库里只保存加密后的 bundle，不会明文提交账号 `auth.json`
+- 始终以当前本地快照为准全量覆盖远端，不会 merge 远端旧账号池
+- 只有导出的账号池真的发生变化时，才会提交并推送
+- `--path <repo_path>`：改用仓库内的其他子目录；必须是相对路径，且不能包含 `..`
+- 如果缺少 `git`，`scodex` 只会给出安装提示，不会强制替你安装
+- 如果私有仓库访问失败，`scodex` 会明确提示你检查仓库 URL，以及 Git 凭据、SSH key 或 PAT
+
+### `pull`
+
+```bash
+export SCODEX_POOL_KEY='替换成和 push 时相同的 secret'
+scodex pull [--path <repo_path>] <repo>
+```
+
+- 会用你现有的 Git 凭据克隆 `<repo>`
+- 需要使用和 `push` 时完全相同的 `SCODEX_POOL_KEY`
+- 默认从 `.scodex-account-pool/bundle.enc.json` 读取加密后的账号池
+- 会直接用远端快照覆盖本地账号池，不做 merge
+- 写入前会清空旧的本地账号目录，并重置本地 usage cache
+- 如果密钥不对，会直接报解密失败，不会导入半套数据
+- `--path <repo_path>`：改用仓库内的其他子目录；必须是相对路径，且不能包含 `..`
 
 ### `list`
 

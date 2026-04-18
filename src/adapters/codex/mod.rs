@@ -20,9 +20,13 @@ use crate::core::ui as core_ui;
 mod account;
 mod auth;
 mod deploy;
+mod device_autofill;
 mod paths;
+mod repo_sync;
 mod ui;
 mod usage;
+
+pub use device_autofill::AutofillRequest;
 
 #[derive(Debug, Default)]
 pub struct CodexAdapter;
@@ -160,6 +164,40 @@ impl CodexAdapter {
         if !status.success() {
             let _ = fs::remove_dir_all(&tmp_home);
             bail!("{}", ui.codex_login_failed(status.code().unwrap_or(1)));
+        }
+
+        let auth_path = tmp_home.join("auth.json");
+        if !auth_path.exists() {
+            let _ = fs::remove_dir_all(&tmp_home);
+            bail!("{}", ui.login_missing_auth());
+        }
+
+        let record = self.import_auth_path(state_dir, state, &tmp_home)?;
+        let _ = fs::remove_dir_all(&tmp_home);
+        Ok(record)
+    }
+
+    pub fn run_device_auth_login_autofill(
+        &self,
+        state_dir: &Path,
+        state: &mut State,
+        request: AutofillRequest,
+    ) -> Result<AccountRecord> {
+        let ui = core_ui::messages();
+        let codex_bin = self.resolve_codex_bin()?;
+        let temp_root = state_dir.join(".tmp");
+        fs::create_dir_all(&temp_root)
+            .with_context(|| format!("failed to create {}", temp_root.display()))?;
+        let tmp_home = temp_root.join(format!("scodex-login-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp_home)
+            .with_context(|| format!("failed to create {}", tmp_home.display()))?;
+
+        println!("{}", ui.login_autofill_start());
+
+        let run = device_autofill::run_device_autofill_login(&codex_bin, &tmp_home, &request);
+        if let Err(error) = run {
+            let _ = fs::remove_dir_all(&tmp_home);
+            return Err(error);
         }
 
         let auth_path = tmp_home.join("auth.json");

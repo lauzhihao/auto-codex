@@ -353,6 +353,47 @@ impl Messages {
         }
     }
 
+    pub fn login_autofill_start(&self) -> &'static str {
+        if self.is_zh() {
+            "正在启动 `codex login` 并打开受控 Chrome 完成 OAuth 自动填充。"
+        } else {
+            "Starting `codex login` and opening a controlled Chrome window for OAuth auto-fill."
+        }
+    }
+
+    pub fn login_autofill_prompt(&self, url: &str, code: Option<&str>) -> String {
+        match (self.is_zh(), code) {
+            (true, Some(code)) => format!("设备授权链接：{url}\n一次性 code：{code}"),
+            (true, None) => format!("设备授权链接：{url}"),
+            (false, Some(code)) => format!("Device URL: {url}\nOne-time code: {code}"),
+            (false, None) => format!("Device URL: {url}"),
+        }
+    }
+
+    pub fn login_autofill_waiting_consent(&self) -> &'static str {
+        if self.is_zh() {
+            "OAuth 自动填充完成。请在刚打开的 Chrome 窗口里点一次 `Authorize` 完成登录。"
+        } else {
+            "OAuth auto-fill complete. Click `Authorize` once in the opened Chrome window to finish."
+        }
+    }
+
+    pub fn login_autofill_no_chrome(&self) -> &'static str {
+        if self.is_zh() {
+            "未检测到 Chrome 或 Chromium，无法执行 OAuth 自动填充。请安装 Chrome，或改用 `scodex login`（不带 --oauth）。"
+        } else {
+            "Chrome or Chromium not detected; cannot run OAuth auto-fill. Install Chrome or run `scodex login` without --oauth."
+        }
+    }
+
+    pub fn login_autofill_missing_credentials(&self) -> &'static str {
+        if self.is_zh() {
+            "使用 --oauth 时必须同时传入 --username 和 --password。"
+        } else {
+            "--oauth requires both --username and --password."
+        }
+    }
+
     pub fn add_opening_signup(&self) -> &'static str {
         if self.is_zh() {
             "正在打开 OpenAI 账号注册页。"
@@ -472,6 +513,170 @@ impl Messages {
             format!("凭证复制失败，退出码：{status}")
         } else {
             format!("Credential copy failed with status {status}")
+        }
+    }
+
+    pub fn repo_sync_missing_git(&self, install_command: &str) -> String {
+        if self.is_zh() {
+            format!(
+                "未找到 git。执行 `scodex push` 或 `scodex pull` 需要它。请先安装 git，例如：{install_command}"
+            )
+        } else {
+            format!(
+                "git not found; `scodex push` and `scodex pull` require it. Install git first, for example: {install_command}"
+            )
+        }
+    }
+
+    pub fn repo_sync_invalid_repo(&self) -> &'static str {
+        if self.is_zh() {
+            "仓库参数不能为空。"
+        } else {
+            "Repository argument must not be empty."
+        }
+    }
+
+    pub fn repo_sync_invalid_path(&self, path: &str) -> String {
+        if self.is_zh() {
+            format!("无效的仓库子目录：{path}。只允许相对路径，且不能包含 `..`。")
+        } else {
+            format!("Invalid repository subdirectory: {path}. Use a relative path without `..`.")
+        }
+    }
+
+    pub fn repo_sync_missing_key(&self, env_name: &str) -> String {
+        if self.is_zh() {
+            format!("未设置账号池加密密钥环境变量：{env_name}")
+        } else {
+            format!("Missing account-pool encryption key environment variable: {env_name}")
+        }
+    }
+
+    pub fn repo_sync_decrypt_failed(&self, env_name: &str) -> String {
+        if self.is_zh() {
+            format!("账号池解密失败。请检查 {env_name} 是否正确，或确认远端仓库里的加密 bundle 没有损坏。")
+        } else {
+            format!("Failed to decrypt the account pool. Check whether {env_name} is correct and whether the encrypted bundle in the repository is intact.")
+        }
+    }
+
+    pub fn repo_sync_clone_failed(&self, repo: &str, status: i32) -> String {
+        if self.is_zh() {
+            format!("克隆仓库失败：{repo}，退出码：{status}")
+        } else {
+            format!("Repository clone failed: {repo}, status {status}")
+        }
+    }
+
+    pub fn repo_sync_clone_auth_failed(&self, repo: &str) -> String {
+        if self.is_zh() {
+            format!("无法访问仓库：{repo}。请检查仓库 URL，以及当前 Git 凭据、SSH key 或 PAT 是否有这个私有仓库的读取权限。")
+        } else {
+            format!("Cannot access repository: {repo}. Check the repository URL and whether your current Git credentials, SSH key, or PAT has read access to this private repository.")
+        }
+    }
+
+    pub fn repo_sync_stage_failed(&self, status: i32) -> String {
+        if self.is_zh() {
+            format!("暂存账号池变更失败，退出码：{status}")
+        } else {
+            format!("Staging account-pool changes failed with status {status}")
+        }
+    }
+
+    pub fn repo_sync_status_failed(&self, status: i32) -> String {
+        if self.is_zh() {
+            format!("检查仓库状态失败，退出码：{status}")
+        } else {
+            format!("Checking repository status failed with status {status}")
+        }
+    }
+
+    pub fn repo_sync_commit_failed(&self, status: i32) -> String {
+        if self.is_zh() {
+            format!("提交账号池变更失败，退出码：{status}")
+        } else {
+            format!("Committing account-pool changes failed with status {status}")
+        }
+    }
+
+    pub fn repo_sync_push_failed(&self, repo: &str, status: i32) -> String {
+        if self.is_zh() {
+            format!("推送账号池变更失败：{repo}，退出码：{status}")
+        } else {
+            format!("Pushing account-pool changes failed: {repo}, status {status}")
+        }
+    }
+
+    pub fn repo_sync_push_auth_failed(&self, repo: &str) -> String {
+        if self.is_zh() {
+            format!("无法写入仓库：{repo}。请检查当前 Git 凭据、SSH key 或 PAT 是否有这个私有仓库的写入权限。")
+        } else {
+            format!("Cannot write to repository: {repo}. Check whether your current Git credentials, SSH key, or PAT has write access to this private repository.")
+        }
+    }
+
+    pub fn repo_push_no_accounts(&self) -> &'static str {
+        if self.is_zh() {
+            "当前状态目录里没有账号可推送。"
+        } else {
+            "No accounts found in the current state directory."
+        }
+    }
+
+    pub fn repo_push_start(&self, repo: &str) -> String {
+        if self.is_zh() {
+            format!("正在把本地账号池全量推送到 {repo}")
+        } else {
+            format!("Pushing the full local account pool to {repo}")
+        }
+    }
+
+    pub fn repo_push_completed(&self, repo: &str, count: usize) -> String {
+        if self.is_zh() {
+            format!("已用本地账号池覆盖 {repo}，共 {count} 个账号")
+        } else {
+            format!("Overwrote {repo} with the local account pool ({count} account(s))")
+        }
+    }
+
+    pub fn repo_push_no_changes(&self, repo: &str) -> String {
+        if self.is_zh() {
+            format!("{repo} 里的账号池没有差异，无需推送")
+        } else {
+            format!("No account-pool changes to push to {repo}")
+        }
+    }
+
+    pub fn repo_pull_start(&self, repo: &str) -> String {
+        if self.is_zh() {
+            format!("正在从 {repo} 拉取账号池，并准备覆盖本地")
+        } else {
+            format!("Pulling the account pool from {repo} and preparing to overwrite local state")
+        }
+    }
+
+    pub fn repo_pull_missing_bundle(&self, path: &str) -> String {
+        if self.is_zh() {
+            format!("仓库里没有找到账号池目录：{path}")
+        } else {
+            format!("Account-pool directory not found in repository: {path}")
+        }
+    }
+
+    pub fn repo_pull_no_accounts(&self, path: &str) -> String {
+        if self.is_zh() {
+            format!("账号池目录里没有可导入的账号：{path}")
+        } else {
+            format!("No importable accounts found in account-pool directory: {path}")
+        }
+    }
+
+    pub fn repo_pull_completed(&self, repo: &str, count: usize) -> String {
+        if self.is_zh() {
+            format!("已用 {repo} 的账号池覆盖本地，共 {count} 个账号")
+        } else {
+            format!("Overwrote the local account pool with {count} account(s) from {repo}")
         }
     }
 }

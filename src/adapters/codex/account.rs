@@ -19,6 +19,16 @@ impl CodexAdapter {
         state: &mut State,
         raw_path: &Path,
     ) -> Result<AccountRecord> {
+        self.import_auth_path_with_id(state_dir, state, raw_path, None)
+    }
+
+    pub(super) fn import_auth_path_with_id(
+        &self,
+        state_dir: &Path,
+        state: &mut State,
+        raw_path: &Path,
+        preferred_id: Option<&str>,
+    ) -> Result<AccountRecord> {
         let input_path = if raw_path.is_dir() {
             raw_path.join("auth.json")
         } else {
@@ -33,6 +43,12 @@ impl CodexAdapter {
             find_matching_account(state, &identity.email, identity.account_id.as_deref());
         let account_id = existing
             .map(|item| item.id.clone())
+            .or_else(|| {
+                preferred_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let account_home = state_dir.join("accounts").join(&account_id);
         fs::create_dir_all(&account_home)

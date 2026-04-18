@@ -1,2 +1,6 @@
 /target
-
+/.claude/
+/.scodex-account-pool/
+/accounts/
+/state.json
+/.state.json.tmp
