@@ -18,8 +18,24 @@ const MAX_REFRESH_WORKERS: usize = 8;
 
 impl CodexAdapter {
     pub fn refresh_all_accounts(&self, state: &mut State) {
+        let api_account_ids = state
+            .accounts
+            .iter()
+            .filter(|account| account.is_api())
+            .map(|account| account.id.clone())
+            .collect::<Vec<_>>();
+        for account_id in api_account_ids {
+            state.usage_cache.remove(&account_id);
+        }
+
+        let accounts = state
+            .accounts
+            .iter()
+            .filter(|account| account.is_subscription())
+            .cloned()
+            .collect::<Vec<_>>();
         let refreshed =
-            collect_refreshed_usage(&state.accounts, &state.usage_cache, |account, previous| {
+            collect_refreshed_usage(&accounts, &state.usage_cache, |account, previous| {
                 self.fetch_usage_for_account(account, previous)
             });
         for (account_id, usage) in refreshed {
@@ -32,6 +48,10 @@ impl CodexAdapter {
         state: &mut State,
         account: &AccountRecord,
     ) -> UsageSnapshot {
+        if account.is_api() {
+            state.usage_cache.remove(&account.id);
+            return UsageSnapshot::default();
+        }
         let usage = self.fetch_usage_for_account(account, state.usage_cache.get(&account.id));
         state.usage_cache.insert(account.id.clone(), usage.clone());
         usage
@@ -472,7 +492,8 @@ mod tests {
         bounded_refresh_worker_count, collect_refreshed_usage_with_worker_count,
         merge_usage_with_previous, normalize_usage_response, parse_chatgpt_base_url,
     };
-    use crate::core::state::{AccountRecord, UsageSnapshot};
+    use crate::adapters::codex::CodexAdapter;
+    use crate::core::state::{AccountRecord, AccountType, State, UsageSnapshot};
 
     #[test]
     fn parse_chatgpt_base_url_reads_config_line() {
@@ -512,6 +533,32 @@ mod tests {
         assert_eq!(usage.five_hour_remaining_percent, Some(80));
         assert_eq!(usage.weekly_remaining_percent, Some(30));
         assert_eq!(usage.credits_balance, Some(12.5));
+    }
+
+    #[test]
+    fn refresh_all_accounts_removes_api_usage_without_fetching() {
+        let adapter = CodexAdapter;
+        let mut state = State {
+            version: 1,
+            accounts: vec![AccountRecord {
+                id: "api".into(),
+                account_type: AccountType::Api,
+                email: "56wxyz@openrouter".into(),
+                ..AccountRecord::default()
+            }],
+            usage_cache: BTreeMap::from([(
+                "api".into(),
+                UsageSnapshot {
+                    weekly_remaining_percent: Some(100),
+                    five_hour_remaining_percent: Some(100),
+                    ..UsageSnapshot::default()
+                },
+            )]),
+        };
+
+        adapter.refresh_all_accounts(&mut state);
+
+        assert!(state.usage_cache.is_empty());
     }
 
     #[test]

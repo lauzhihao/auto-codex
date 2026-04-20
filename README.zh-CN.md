@@ -68,12 +68,12 @@ cargo build --release
 | `scodex` | 刷新额度；如果当前账号的 5h 剩余额度至少还有 20% 就继续使用它，否则切换到最佳账号，然后启动或恢复 Codex |
 | `scodex launch` | 默认行为的显式写法 |
 | `scodex auto` | 刷新额度；如果当前账号的 5h 剩余额度至少还有 20% 就继续使用它，否则切换到最佳账号，但不启动 Codex |
-| `scodex add` | 尽量自动打开 OpenAI 注册页，然后通过设备登录添加一个账号 |
-| `scodex login` | 通过 `codex login --device-auth` 添加一个账号 |
+| `scodex add` | 通过设备登录添加一个账号并立即切换（`--switch` 仅保留兼容） |
+| `scodex login` | 通过 `codex login --device-auth` 添加官方订阅账号，或通过 `--api` 添加 API 账号 |
 | `scodex deploy <target>` | 把当前 `~/.codex/auth.json` 复制到远端机器和路径（`sync` 为别名） |
 | `scodex push <repo>` | 把本地账号池推送到 Git 仓库的指定子目录 |
 | `scodex pull <repo>` | 从 Git 仓库的指定子目录拉取账号池并导入到本地状态目录 |
-| `scodex use <email>` | 按邮箱直接切换到一个已知账号 |
+| `scodex use <email>` | 按邮箱或 API 账号标识直接切换到一个已知账号 |
 | `scodex rm <email>` | 按邮箱删除一个已保存的账号（默认会交互式二次确认，可加 `-y` 跳过） |
 | `scodex list` | 先刷新实时额度，再显示最新账号额度 |
 | `scodex refresh` | 刷新所有已知账号的实时额度，并直接打印最新结果 |
@@ -115,11 +115,17 @@ scodex auto [--no-import-known] [--no-login] [--dry-run]
 
 ```bash
 scodex login [--oauth --username <EMAIL> --password <PASS>]
+scodex login --api --API_TOKEN <TOKEN> --BASE_URL <URL> --provider <NAME>
 ```
 
 - 登录完成后会直接切换到新账号
 - `--oauth`：使用浏览器 OAuth 流程，并在受控 Chrome 窗口中自动填充提供的凭据
 - `--username <EMAIL>` / `--password <PASS>`：开启 `--oauth` 时必须同时提供
+- `--api`：添加 API key 账号，并立即切换到这个账号
+- `--API_TOKEN <TOKEN>` / `--BASE_URL <URL>` / `--provider <NAME>`：开启 `--api` 时必须同时提供
+- API 账号标识显示为 `sk-<前4位>-<后4位>@<provider>`，例如 `sk-abcd-wxyz@openrouter`
+- API 账号没有 5h、Weekly、重置时间这三类额度概念，这三列固定显示 `N/A`
+- 自动选号会忽略 API 账号；需要用 `scodex use <标识>` 手动切换
 
 ### `add`
 
@@ -127,10 +133,9 @@ scodex login [--oauth --username <EMAIL> --password <PASS>]
 scodex add [--switch]
 ```
 
-- 会尽量在默认浏览器中打开 `https://auth.openai.com/create-account`
-- 如果当前环境没有可用图形界面，就会打印注册链接并进入引导模式
-- 注册或登录完成后，会继续执行 `codex login --device-auth`
-- `--switch`：注册/登录完成后立即切换到新账号
+- 复用普通设备登录流程
+- 总是会立即切换到新增账号
+- `--switch`：兼容旧用法的保留选项；当前 `add` 总是会切换
 
 ### `use`
 
@@ -179,6 +184,7 @@ scodex push [-i <identity_file>] [--path <repo_path>] <repo>
 - 默认把本地账号池导出到 `.scodex-account-pool/bundle.enc.json`
 - 默认把本地托管账号状态保存到 `~/.scodex`
 - 仓库里只保存加密后的 bundle，不会明文提交账号 `auth.json`
+- API 账号会连同它的托管 provider 配置一起写入加密 bundle
 - 始终以当前本地快照为准全量覆盖远端，不会 merge 远端旧账号池
 - 只有导出的账号池真的发生变化时，才会提交并推送
 - `--path <repo_path>`：改用仓库内的其他子目录；必须是相对路径，且不能包含 `..`
@@ -200,7 +206,8 @@ scodex pull [-i <identity_file>] [--path <repo_path>] <repo>
 - 默认把拉取后的本地账号池写入 `~/.scodex`
 - 会直接用远端快照覆盖本地账号池，不做 merge
 - 写入前会清空旧的本地账号目录，并重置本地 usage cache
-- 导入完成后会立即刷新实时额度，并打印最新账号列表
+- 导入完成后会立即刷新官方订阅账号的实时额度，并打印最新账号列表
+- API 账号会连同它的托管 provider 配置一起恢复，且不会参与额度刷新
 - 如果密钥不对，会直接报解密失败，不会导入半套数据
 - `--path <repo_path>`：改用仓库内的其他子目录；必须是相对路径，且不能包含 `..`
 - 如果未传 `--path`，且设置了 `SCODEX_POOL_PATH`，则优先使用该环境变量
@@ -212,7 +219,8 @@ scodex pull [-i <identity_file>] [--path <repo_path>] <repo>
 scodex list
 ```
 
-- 会先调用实时额度接口，再打印最新的账号额度快照
+- 会先刷新官方订阅账号的实时额度，再打印最新账号快照
+- 表格包含 `Type` 字段：官方订阅账号显示额度；API 账号的 5h、Weekly、重置时间固定显示 `N/A`
 
 ### `refresh`
 
@@ -220,7 +228,8 @@ scodex list
 scodex refresh
 ```
 
-- 会对所有已知账号调用实时额度接口
+- 会对所有已知官方订阅账号调用实时额度接口
+- API 账号没有订阅额度窗口，因此刷新时会跳过
 - 刷新完成后会立刻打印最新账号列表
 - 当前 Rust 发行版会并行刷新账号额度
 

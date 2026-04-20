@@ -84,6 +84,7 @@ impl From<LiveIdentityWithPlan> for LiveIdentity {
         Self {
             email: value.email,
             account_id: value.account_id,
+            scodex_account_id: None,
         }
     }
 }

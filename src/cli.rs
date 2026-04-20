@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-use crate::adapters::codex::{AutofillRequest, CodexAdapter};
+use crate::adapters::codex::{ApiLoginRequest, AutofillRequest, CodexAdapter};
 use crate::core::state::{AccountRecord, UsageSnapshot};
 use crate::core::storage;
 use crate::core::ui;
@@ -72,6 +72,8 @@ pub struct AutoArgs {
 
 #[derive(Debug, Args)]
 pub struct LoginArgs {
+    #[command(flatten)]
+    pub api_args: ApiArgs,
     #[arg(long)]
     pub oauth: bool,
     #[arg(long)]
@@ -82,8 +84,22 @@ pub struct LoginArgs {
 
 #[derive(Debug, Args)]
 pub struct AddArgs {
+    #[command(flatten)]
+    pub api_args: ApiArgs,
     #[arg(long)]
     pub switch: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ApiArgs {
+    #[arg(long)]
+    pub api: bool,
+    #[arg(long = "API_TOKEN")]
+    pub api_token: Option<String>,
+    #[arg(long = "BASE_URL")]
+    pub base_url: Option<String>,
+    #[arg(long)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -147,6 +163,9 @@ pub fn run(cli: Cli) -> Result<i32> {
     let adapter = CodexAdapter::default();
     let state_dir = storage::resolve_state_dir(cli.state_dir.as_deref())?;
     let mut state = storage::load_state(&state_dir)?;
+    if adapter.normalize_account_records(&mut state) {
+        storage::save_state(&state_dir, &state)?;
+    }
     let command = cli.command.unwrap_or(Command::Launch(LaunchArgs {
         no_import_known: false,
         no_login: false,
@@ -212,29 +231,25 @@ pub fn run(cli: Cli) -> Result<i32> {
             }
         }
         Command::Login(args) => {
-            let record = if args.oauth {
+            let record = if args.api_args.api {
+                let request = build_api_login_request(&args.api_args, &ui)?;
+                adapter.run_api_key_login(&state_dir, &mut state, request)?
+            } else if args.oauth {
                 let request = build_autofill_request(&args, &ui)?;
                 adapter.run_device_auth_login_autofill(&state_dir, &mut state, request)?
             } else {
                 adapter.run_device_auth_login(&state_dir, &mut state)?
             };
-            let usage = adapter.refresh_account_usage(&mut state, &record);
-            println!("{}", ui.added_account(&record.email));
-            adapter.switch_account(&record)?;
-            print_selection(ui.selection_switched(), &record, &usage);
-            storage::save_state(&state_dir, &state)?;
-            0
+            finish_added_account(&adapter, &state_dir, &mut state, &record)?
         }
         Command::Add(args) => {
-            let record = adapter.add_account_via_browser(&state_dir, &mut state)?;
-            let usage = adapter.refresh_account_usage(&mut state, &record);
-            println!("{}", ui.added_account(&record.email));
-            if args.switch {
-                adapter.switch_account(&record)?;
-                print_selection(ui.selection_switched(), &record, &usage);
-            }
-            storage::save_state(&state_dir, &state)?;
-            0
+            let record = if args.api_args.api {
+                let request = build_api_login_request(&args.api_args, &ui)?;
+                adapter.run_api_key_login(&state_dir, &mut state, request)?
+            } else {
+                adapter.run_device_auth_login(&state_dir, &mut state)?
+            };
+            finish_added_account(&adapter, &state_dir, &mut state, &record)?
         }
         Command::Use(args) => {
             adapter.import_known_sources(&state_dir, &mut state);
@@ -417,7 +432,25 @@ fn format_percent(value: Option<i64>) -> String {
         .unwrap_or_else(|| ui.na().into())
 }
 
+fn finish_added_account(
+    adapter: &CodexAdapter,
+    state_dir: &std::path::Path,
+    state: &mut crate::core::state::State,
+    record: &AccountRecord,
+) -> Result<i32> {
+    let ui = ui::messages();
+    let usage = adapter.refresh_account_usage(state, record);
+    println!("{}", ui.added_account(&record.email));
+    adapter.switch_account(record)?;
+    print_selection(ui.selection_switched(), record, &usage);
+    storage::save_state(state_dir, state)?;
+    Ok(0)
+}
+
 fn build_autofill_request(args: &LoginArgs, ui: &ui::Messages) -> Result<AutofillRequest> {
+    if args.api_args.api {
+        anyhow::bail!("{}", ui.login_mode_conflict());
+    }
     match (args.username.as_deref(), args.password.as_deref()) {
         (Some(email), Some(password)) if !email.trim().is_empty() && !password.is_empty() => {
             Ok(AutofillRequest {
@@ -427,6 +460,29 @@ fn build_autofill_request(args: &LoginArgs, ui: &ui::Messages) -> Result<Autofil
         }
         _ => anyhow::bail!("{}", ui.login_autofill_missing_credentials()),
     }
+}
+
+fn build_api_login_request(args: &ApiArgs, ui: &ui::Messages) -> Result<ApiLoginRequest> {
+    let Some(api_token) = args.api_token.as_deref().map(str::trim) else {
+        anyhow::bail!("{}", ui.login_api_missing_credentials());
+    };
+    let Some(base_url) = args.base_url.as_deref().map(str::trim) else {
+        anyhow::bail!("{}", ui.login_api_missing_credentials());
+    };
+    let Some(provider) = args.provider.as_deref().map(str::trim) else {
+        anyhow::bail!("{}", ui.login_api_missing_credentials());
+    };
+
+    let display_body = api_token.strip_prefix("sk-").unwrap_or(api_token);
+    if display_body.chars().count() < 8 || base_url.is_empty() || provider.is_empty() {
+        anyhow::bail!("{}", ui.login_api_missing_credentials());
+    }
+
+    Ok(ApiLoginRequest {
+        api_token: api_token.to_string(),
+        base_url: base_url.to_string(),
+        provider: provider.to_ascii_lowercase(),
+    })
 }
 
 fn print_selection(prefix: &str, account: &AccountRecord, usage: &UsageSnapshot) {
@@ -538,11 +594,7 @@ fn render_help_en(topic: HelpTopic) -> String {
                 "  auto         Switch to the best account without launching Codex"
             )
             .unwrap();
-            writeln!(
-                &mut out,
-                "  add          Open the signup page, then add one account"
-            )
-            .unwrap();
+            writeln!(&mut out, "  add          Add one account and switch to it").unwrap();
             writeln!(
                 &mut out,
                 "  login        Add one account through device auth"
@@ -662,10 +714,32 @@ fn render_help_en(topic: HelpTopic) -> String {
             writeln!(&mut out, "Usage:").unwrap();
             writeln!(&mut out, "  scodex add [OPTIONS]").unwrap();
             writeln!(&mut out).unwrap();
+            writeln!(&mut out, "Adds one account and switches to it.").unwrap();
+            writeln!(&mut out).unwrap();
             writeln!(&mut out, "Options:").unwrap();
             writeln!(
                 &mut out,
-                "      --switch  Switch to the newly added account after signup/login"
+                "      --switch  Deprecated compatibility option; add always switches now"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --api                Add an API-key account; requires --API_TOKEN, --BASE_URL, and --provider"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --API_TOKEN <TOKEN>  API token used when --api is set"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --BASE_URL <URL>     API base URL used when --api is set"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --provider <NAME>    Provider id used when --api is set"
             )
             .unwrap();
             writeln!(&mut out, "  -h, --help    Print help").unwrap();
@@ -675,6 +749,26 @@ fn render_help_en(topic: HelpTopic) -> String {
             writeln!(&mut out, "  scodex login [OPTIONS]").unwrap();
             writeln!(&mut out).unwrap();
             writeln!(&mut out, "Options:").unwrap();
+            writeln!(
+                &mut out,
+                "      --api                Add an API-key account; requires --API_TOKEN, --BASE_URL, and --provider"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --API_TOKEN <TOKEN>  API token used when --api is set"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --BASE_URL <URL>     API base URL used when --api is set"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --provider <NAME>    Provider id used when --api is set"
+            )
+            .unwrap();
             writeln!(
                 &mut out,
                 "      --oauth              Use the browser OAuth flow with auto-fill; requires --username and --password"
@@ -875,7 +969,7 @@ fn render_help_zh(topic: HelpTopic) -> String {
             )
             .unwrap();
             writeln!(&mut out, "  auto         切换到最佳账号，但不启动 Codex").unwrap();
-            writeln!(&mut out, "  add          打开注册页，然后新增一个账号").unwrap();
+            writeln!(&mut out, "  add          新增一个账号并切换").unwrap();
             writeln!(&mut out, "  login        通过设备登录新增一个账号").unwrap();
             writeln!(
                 &mut out,
@@ -951,8 +1045,34 @@ fn render_help_zh(topic: HelpTopic) -> String {
             writeln!(&mut out, "用法：").unwrap();
             writeln!(&mut out, "  scodex add [选项]").unwrap();
             writeln!(&mut out).unwrap();
+            writeln!(&mut out, "新增一个账号，并立即切换到该账号。").unwrap();
+            writeln!(&mut out).unwrap();
             writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "      --switch  注册/登录完成后切换到新账号").unwrap();
+            writeln!(
+                &mut out,
+                "      --switch  兼容旧用法的保留选项；当前 add 总是会切换"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --api                新增 API key 账号，需要同时传入 --API_TOKEN、--BASE_URL 和 --provider"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --API_TOKEN <TOKEN>  --api 模式下使用的 API token"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --BASE_URL <URL>     --api 模式下使用的 API base URL"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --provider <NAME>    --api 模式下使用的 provider id"
+            )
+            .unwrap();
             writeln!(&mut out, "  -h, --help    显示帮助").unwrap();
         }
         HelpTopic::Login => {
@@ -960,6 +1080,26 @@ fn render_help_zh(topic: HelpTopic) -> String {
             writeln!(&mut out, "  scodex login [选项]").unwrap();
             writeln!(&mut out).unwrap();
             writeln!(&mut out, "选项：").unwrap();
+            writeln!(
+                &mut out,
+                "      --api                新增 API key 账号，需要同时传入 --API_TOKEN、--BASE_URL 和 --provider"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --API_TOKEN <TOKEN>  --api 模式下使用的 API token"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --BASE_URL <URL>     --api 模式下使用的 API base URL"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "      --provider <NAME>    --api 模式下使用的 provider id"
+            )
+            .unwrap();
             writeln!(
                 &mut out,
                 "      --oauth              使用浏览器 OAuth 流程并自动填充，需要同时传入 --username 和 --password"
@@ -1122,4 +1262,41 @@ fn render_help_zh(topic: HelpTopic) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    #[test]
+    fn add_supports_api_options() {
+        let cli = Cli::try_parse_from([
+            "scodex",
+            "add",
+            "--api",
+            "--API_TOKEN",
+            "sk-abcdef123456wxyz",
+            "--BASE_URL",
+            "https://example.com/v1",
+            "--provider",
+            "openrouter",
+        ])
+        .expect("add --api should parse");
+
+        let Command::Add(args) = cli.command.expect("subcommand should exist") else {
+            panic!("expected add command");
+        };
+        assert!(args.api_args.api);
+        assert_eq!(
+            args.api_args.api_token.as_deref(),
+            Some("sk-abcdef123456wxyz")
+        );
+        assert_eq!(
+            args.api_args.base_url.as_deref(),
+            Some("https://example.com/v1")
+        );
+        assert_eq!(args.api_args.provider.as_deref(), Some("openrouter"));
+    }
 }

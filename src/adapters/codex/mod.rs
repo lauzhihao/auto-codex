@@ -28,6 +28,13 @@ mod usage;
 
 pub use device_autofill::AutofillRequest;
 
+#[derive(Debug, Clone)]
+pub struct ApiLoginRequest {
+    pub api_token: String,
+    pub base_url: String,
+    pub provider: String,
+}
+
 #[derive(Debug, Default)]
 pub struct CodexAdapter;
 
@@ -50,29 +57,16 @@ impl CliAdapter for CodexAdapter {
 }
 
 impl CodexAdapter {
-    pub fn add_account_via_browser(
-        &self,
-        state_dir: &Path,
-        state: &mut State,
-    ) -> Result<AccountRecord> {
-        const SIGNUP_URL: &str = "https://auth.openai.com/create-account";
-        let ui = core_ui::messages();
-
-        println!("{}", ui.add_opening_signup());
-        match try_open_signup_page(SIGNUP_URL) {
-            Ok(BrowserOpenOutcome::Opened) => println!("{}", ui.add_opened_signup(SIGNUP_URL)),
-            Ok(BrowserOpenOutcome::NoGui) => {
-                println!("{}", ui.add_no_gui_open_manually(SIGNUP_URL))
-            }
-            Ok(BrowserOpenOutcome::Failed) | Err(_) => {
-                println!("{}", ui.add_browser_open_failed(SIGNUP_URL))
-            }
-        }
-        self.wait_for_enter_after_signup()?;
-        self.run_device_auth_login(state_dir, state)
-    }
-
     pub fn read_live_identity(&self) -> Option<LiveIdentity> {
+        let home = codex_home();
+        if let Some(account_id) = account::read_managed_config_account_id(&home) {
+            return Some(LiveIdentity {
+                email: String::new(),
+                account_id: None,
+                scodex_account_id: Some(account_id),
+            });
+        }
+
         let auth_path = codex_home().join("auth.json");
         let auth = self.read_auth_json(&auth_path).ok()?;
         decode_identity(&auth).ok().map(Into::into)
@@ -211,19 +205,31 @@ impl CodexAdapter {
         Ok(record)
     }
 
-    fn wait_for_enter_after_signup(&self) -> Result<()> {
-        let ui = core_ui::messages();
-        println!("{}", ui.add_finish_signup_then_continue());
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            return Ok(());
-        }
-        print!("{}", ui.add_waiting_enter());
-        io::stdout().flush().context("failed to flush stdout")?;
-        let mut line = String::new();
-        io::stdin()
-            .read_line(&mut line)
-            .context("failed to read continuation input")?;
-        Ok(())
+    pub fn run_api_key_login(
+        &self,
+        state_dir: &Path,
+        state: &mut State,
+        request: ApiLoginRequest,
+    ) -> Result<AccountRecord> {
+        let temp_root = state_dir.join(".tmp");
+        fs::create_dir_all(&temp_root)
+            .with_context(|| format!("failed to create {}", temp_root.display()))?;
+        let tmp_home = temp_root.join(format!("scodex-login-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp_home)
+            .with_context(|| format!("failed to create {}", tmp_home.display()))?;
+        let auth_path = tmp_home.join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "OPENAI_API_KEY": &request.api_token,
+            })
+            .to_string(),
+        )
+        .with_context(|| format!("failed to write {}", auth_path.display()))?;
+
+        let record = self.import_api_auth_path(state_dir, state, &tmp_home, &request)?;
+        let _ = fs::remove_dir_all(&tmp_home);
+        Ok(record)
     }
 
     pub fn launch_codex(&self, extra_args: &[std::ffi::OsString], resume: bool) -> Result<i32> {
@@ -346,67 +352,6 @@ impl CodexAdapter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserOpenOutcome {
-    Opened,
-    NoGui,
-    Failed,
-}
-
-fn try_open_signup_page(url: &str) -> Result<BrowserOpenOutcome> {
-    if requires_gui_hint() && !has_gui_environment() {
-        return Ok(BrowserOpenOutcome::NoGui);
-    }
-
-    let Some((program, args)) = browser_open_command(url) else {
-        return Ok(BrowserOpenOutcome::NoGui);
-    };
-
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to open browser for {url}"))?;
-    if status.success() {
-        Ok(BrowserOpenOutcome::Opened)
-    } else {
-        Ok(BrowserOpenOutcome::Failed)
-    }
-}
-
-fn requires_gui_hint() -> bool {
-    !(cfg!(target_os = "windows") || cfg!(target_os = "macos"))
-}
-
-fn has_gui_environment() -> bool {
-    if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
-        return true;
-    }
-
-    env::var_os("DISPLAY").is_some()
-        || env::var_os("WAYLAND_DISPLAY").is_some()
-        || env::var_os("MIR_SOCKET").is_some()
-}
-
-fn browser_open_command(url: &str) -> Option<(&'static str, Vec<String>)> {
-    if cfg!(target_os = "macos") {
-        return Some(("open", vec![url.to_string()]));
-    }
-    if cfg!(target_os = "windows") {
-        return Some((
-            "cmd",
-            vec!["/C".into(), "start".into(), "".into(), url.to_string()],
-        ));
-    }
-
-    if find_in_path("xdg-open").is_some() {
-        Some(("xdg-open", vec![url.to_string()]))
-    } else if find_in_path("gio").is_some() {
-        Some(("gio", vec!["open".into(), url.to_string()]))
-    } else {
-        None
-    }
-}
-
 pub(crate) fn parse_yes_no(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(true),
@@ -502,7 +447,11 @@ mod tests {
 
     use std::ffi::OsString;
 
-    use super::{build_codex_launch_command, has_resumable_session_under, parse_yes_no};
+    use super::{
+        ApiLoginRequest, CodexAdapter, build_codex_launch_command, has_resumable_session_under,
+        parse_yes_no,
+    };
+    use crate::core::state::{AccountType, State};
 
     #[test]
     fn build_launch_command_adds_resume_and_yolo_when_needed() {
@@ -553,5 +502,33 @@ mod tests {
         assert_eq!(parse_yes_no("N"), Some(false));
         assert_eq!(parse_yes_no("No"), Some(false));
         assert_eq!(parse_yes_no("maybe"), None);
+    }
+
+    #[test]
+    fn api_login_writes_auth_json_from_cli_token() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("scodex-api-login-{}", Uuid::new_v4()));
+        let state_dir = tmp.join("state");
+        let mut state = State::default();
+
+        let record = CodexAdapter.run_api_key_login(
+            &state_dir,
+            &mut state,
+            ApiLoginRequest {
+                api_token: "sk-abcdef123456wxyz".into(),
+                base_url: "https://example.com/v1".into(),
+                provider: "openrouter".into(),
+            },
+        )?;
+
+        let auth_contents = fs::read_to_string(&record.auth_path)?;
+        assert_eq!(
+            auth_contents,
+            "{\"OPENAI_API_KEY\":\"sk-abcdef123456wxyz\"}"
+        );
+        assert_eq!(record.account_type, AccountType::Api);
+        assert_eq!(record.api_provider.as_deref(), Some("openrouter"));
+        assert_eq!(state.accounts.len(), 1);
+        fs::remove_dir_all(&tmp)?;
+        Ok(())
     }
 }

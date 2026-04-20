@@ -233,12 +233,21 @@ impl Messages {
         if self.is_zh() { "未知" } else { "Unknown" }
     }
 
-    pub fn table_headers(&self) -> [&'static str; 7] {
+    pub fn table_headers(&self) -> [&'static str; 8] {
         if self.is_zh() {
-            ["当前", "邮箱", "套餐", "5h", "Weekly", "重置时间", "状态"]
+            [
+                "当前",
+                "邮箱",
+                "类型",
+                "套餐",
+                "5h",
+                "Weekly",
+                "重置时间",
+                "状态",
+            ]
         } else {
             [
-                "Active", "Email", "Plan", "5h", "Weekly", "ResetOn", "Status",
+                "Active", "Email", "Type", "Plan", "5h", "Weekly", "ResetOn", "Status",
             ]
         }
     }
@@ -426,53 +435,19 @@ impl Messages {
         }
     }
 
-    pub fn add_opening_signup(&self) -> &'static str {
+    pub fn login_api_missing_credentials(&self) -> &'static str {
         if self.is_zh() {
-            "正在打开 OpenAI 账号注册页。"
+            "使用 --api 时必须同时传入 --API_TOKEN、--BASE_URL 和 --provider，且 token 去掉 sk- 前缀后至少 8 个字符。"
         } else {
-            "Opening the OpenAI account signup page."
+            "--api requires --API_TOKEN, --BASE_URL, and --provider, and the token must be at least 8 characters after removing the sk- prefix."
         }
     }
 
-    pub fn add_opened_signup(&self, url: &str) -> String {
+    pub fn login_mode_conflict(&self) -> &'static str {
         if self.is_zh() {
-            format!("已尝试打开：{url}")
+            "--api 和 --oauth 不能同时使用。"
         } else {
-            format!("Opened: {url}")
-        }
-    }
-
-    pub fn add_no_gui_open_manually(&self, url: &str) -> String {
-        if self.is_zh() {
-            format!("未检测到可用图形界面。请在另一台可用浏览器的设备上打开：{url}")
-        } else {
-            format!(
-                "No GUI environment detected. Open this URL on another browser-enabled device: {url}"
-            )
-        }
-    }
-
-    pub fn add_browser_open_failed(&self, url: &str) -> String {
-        if self.is_zh() {
-            format!("未能自动打开浏览器。请手动访问：{url}")
-        } else {
-            format!("Could not open a browser automatically. Please visit: {url}")
-        }
-    }
-
-    pub fn add_finish_signup_then_continue(&self) -> &'static str {
-        if self.is_zh() {
-            "完成注册或登录后，按回车继续。"
-        } else {
-            "After you finish signup or login, press Enter to continue."
-        }
-    }
-
-    pub fn add_waiting_enter(&self) -> &'static str {
-        if self.is_zh() {
-            "按回车继续："
-        } else {
-            "Press Enter to continue: "
+            "--api and --oauth cannot be used together."
         }
     }
 

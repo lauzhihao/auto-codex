@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::CodexAdapter;
 use super::paths::find_program;
-use crate::core::state::{AccountRecord, STATE_VERSION, State};
+use crate::core::state::{AccountRecord, AccountType, STATE_VERSION, State};
 use crate::core::storage;
 use crate::core::ui as core_ui;
 
@@ -150,9 +150,17 @@ struct RepoBundle {
 #[derive(Debug, Serialize, Deserialize)]
 struct RepoBundleAccount {
     id: String,
+    #[serde(default)]
+    account_type: AccountType,
     email: String,
     account_id: Option<String>,
     plan: Option<String>,
+    #[serde(default)]
+    api_provider: Option<String>,
+    #[serde(default)]
+    api_base_url: Option<String>,
+    #[serde(default)]
+    api_token_label: Option<String>,
     added_at: i64,
     updated_at: i64,
     auth_json: String,
@@ -205,9 +213,13 @@ fn export_account_bundle(account: &AccountRecord) -> Result<RepoBundleAccount> {
 
     Ok(RepoBundleAccount {
         id: account.id.clone(),
+        account_type: account.account_type,
         email: account.email.clone(),
         account_id: account.account_id.clone(),
         plan: account.plan.clone(),
+        api_provider: account.api_provider.clone(),
+        api_base_url: account.api_base_url.clone(),
+        api_token_label: account.api_token_label.clone(),
         added_at: account.added_at,
         updated_at: account.updated_at,
         auth_json,
@@ -335,11 +347,15 @@ fn overwrite_local_account_pool(state_dir: &Path, bundle: &RepoBundle) -> Result
 
         records.push(AccountRecord {
             id: account.id.clone(),
+            account_type: account.account_type,
             email: account.email.clone(),
             account_id: account.account_id.clone(),
             plan: account.plan.clone(),
             auth_path: final_auth.to_string_lossy().into_owned(),
             config_path: final_config.map(|item| item.to_string_lossy().into_owned()),
+            api_provider: account.api_provider.clone(),
+            api_base_url: account.api_base_url.clone(),
+            api_token_label: account.api_token_label.clone(),
             added_at: account.added_at,
             updated_at: account.updated_at,
         });
@@ -666,6 +682,7 @@ mod tests {
         derive_bundle_key, encrypt_bundle_bytes, overwrite_local_account_pool, resolve_bundle_dir,
         resolve_bundle_dir_source, resolve_bundle_key_from_value,
     };
+    use crate::core::state::AccountType;
 
     #[test]
     fn bundle_dir_defaults_when_missing() -> Result<()> {
@@ -714,9 +731,13 @@ mod tests {
             exported_at: 1,
             accounts: vec![RepoBundleAccount {
                 id: "acct-1".into(),
+                account_type: AccountType::Subscription,
                 email: "a@example.com".into(),
                 account_id: Some("acct-remote-1".into()),
                 plan: Some("Plus".into()),
+                api_provider: None,
+                api_base_url: None,
+                api_token_label: None,
                 added_at: 1,
                 updated_at: 2,
                 auth_json: "{\"tokens\":{}}".into(),
@@ -773,22 +794,51 @@ mod tests {
         let bundle = RepoBundle {
             version: 1,
             exported_at: 1,
-            accounts: vec![RepoBundleAccount {
-                id: "acct-1".into(),
-                email: "pool@example.com".into(),
-                account_id: Some("acct-remote-1".into()),
-                plan: Some("Plus".into()),
-                added_at: 10,
-                updated_at: 20,
-                auth_json: "{\"tokens\":{\"access_token\":\"x\"}}".into(),
-                config_toml: Some("model = \"gpt-5\"".into()),
-            }],
+            accounts: vec![
+                RepoBundleAccount {
+                    id: "acct-1".into(),
+                    account_type: AccountType::Subscription,
+                    email: "pool@example.com".into(),
+                    account_id: Some("acct-remote-1".into()),
+                    plan: Some("Plus".into()),
+                    api_provider: None,
+                    api_base_url: None,
+                    api_token_label: None,
+                    added_at: 10,
+                    updated_at: 20,
+                    auth_json: "{\"tokens\":{\"access_token\":\"x\"}}".into(),
+                    config_toml: Some("model = \"gpt-5\"".into()),
+                },
+                RepoBundleAccount {
+                    id: "api-1".into(),
+                    account_type: AccountType::Api,
+                    email: "56wxyz@openrouter".into(),
+                    account_id: None,
+                    plan: None,
+                    api_provider: Some("openrouter".into()),
+                    api_base_url: Some("https://example.com/v1".into()),
+                    api_token_label: Some("sk-abcd-wxyz".into()),
+                    added_at: 11,
+                    updated_at: 21,
+                    auth_json: "{\"OPENAI_API_KEY\":\"sk-secret\"}".into(),
+                    config_toml: Some("# scodex-managed-api-config\n".into()),
+                },
+            ],
         };
 
         let state = overwrite_local_account_pool(&state_dir, &bundle)?;
 
-        assert_eq!(state.accounts.len(), 1);
+        assert_eq!(state.accounts.len(), 2);
         assert_eq!(state.accounts[0].id, "acct-1");
+        assert_eq!(state.accounts[1].account_type, AccountType::Api);
+        assert_eq!(
+            state.accounts[1].api_provider.as_deref(),
+            Some("openrouter")
+        );
+        assert_eq!(
+            state.accounts[1].api_base_url.as_deref(),
+            Some("https://example.com/v1")
+        );
         assert!(state.usage_cache.is_empty());
         assert!(!state_dir.join("accounts").join("old-acct").exists());
         assert!(
@@ -802,6 +852,13 @@ mod tests {
             state_dir
                 .join("accounts")
                 .join("acct-1")
+                .join("config.toml")
+                .exists()
+        );
+        assert!(
+            state_dir
+                .join("accounts")
+                .join("api-1")
                 .join("config.toml")
                 .exists()
         );

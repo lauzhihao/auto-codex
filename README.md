@@ -68,12 +68,12 @@ Use `scodex` as the default command. The legacy `auto-codex` wrapper is kept onl
 | `scodex` | Refresh usage, keep the current account when its 5h quota is at least 20%, otherwise switch to the best account, then launch or resume Codex |
 | `scodex launch` | Explicit form of the default behavior |
 | `scodex auto` | Refresh usage, keep the current account when its 5h quota is at least 20%, otherwise switch to the best account, without launching Codex |
-| `scodex add` | Open the OpenAI signup page when possible, then add one account through device auth |
-| `scodex login` | Add one account via `codex login --device-auth` |
+| `scodex add` | Add one account through device auth and switch to it (`--switch` is kept for compatibility) |
+| `scodex login` | Add one subscription account via `codex login --device-auth`, or add one API account with `--api` |
 | `scodex deploy <target>` | Copy the current `~/.codex/auth.json` to a remote machine and path (`sync` is an alias) |
 | `scodex push <repo>` | Push the local account pool into a Git repository subdirectory |
 | `scodex pull <repo>` | Pull an account pool from a Git repository subdirectory into the local state directory |
-| `scodex use <email>` | Switch directly to a known account by email |
+| `scodex use <email>` | Switch directly to a known account by email or API account identifier |
 | `scodex rm <email>` | Remove a stored account by email (interactive confirm, `-y` to skip) |
 | `scodex list` | Refresh live usage, then show the latest account quotas |
 | `scodex refresh` | Refresh live usage for all known accounts and print the latest results |
@@ -115,11 +115,17 @@ scodex auto [--no-import-known] [--no-login] [--dry-run]
 
 ```bash
 scodex login [--oauth --username <EMAIL> --password <PASS>]
+scodex login --api --API_TOKEN <TOKEN> --BASE_URL <URL> --provider <NAME>
 ```
 
 - login always switches to the newly added account
 - `--oauth`: use the browser OAuth flow and auto-fill the provided credentials in a controlled Chrome window
 - `--username <EMAIL>` / `--password <PASS>`: required together with `--oauth`
+- `--api`: add an API-key account and switch to it immediately
+- `--API_TOKEN <TOKEN>` / `--BASE_URL <URL>` / `--provider <NAME>`: required together with `--api`
+- API account identifiers are shown as `sk-<first4>-<last4>@<provider>`, for example `sk-abcd-wxyz@openrouter`
+- API accounts do not have 5h, Weekly, or reset quota columns; those values are always `N/A`
+- automatic account selection ignores API accounts; switch to them explicitly with `scodex use <identifier>`
 
 ### `add`
 
@@ -127,10 +133,9 @@ scodex login [--oauth --username <EMAIL> --password <PASS>]
 scodex add [--switch]
 ```
 
-- tries to open `https://auth.openai.com/create-account` in the default browser
-- if no GUI is available, prints the signup URL and continues in guided mode
-- after signup or login, continues with `codex login --device-auth`
-- `--switch`: switch to the newly added account after signup/login
+- reuses the normal device-auth login flow
+- always switches to the newly added account
+- `--switch`: deprecated compatibility option; `add` always switches now
 
 ### `use`
 
@@ -179,6 +184,7 @@ scodex push [-i <identity_file>] [--path <repo_path>] <repo>
 - exports the local account pool into `.scodex-account-pool/bundle.enc.json` by default
 - stores local managed account state under `~/.scodex` by default
 - the repository only stores the encrypted bundle; account auth files are not committed in plaintext
+- API accounts are included in the encrypted bundle together with their managed provider config
 - always pushes the current local snapshot as the source of truth; it does not merge remote account-pool history
 - commits and pushes only when the exported bundle changed
 - `--path <repo_path>`: use a different repository subdirectory; it must stay relative and must not contain `..`
@@ -200,7 +206,8 @@ scodex pull [-i <identity_file>] [--path <repo_path>] <repo>
 - writes the pulled local account pool into `~/.scodex` by default
 - force-overwrites the local account pool with the remote snapshot instead of merging
 - clears old local account homes and resets local usage cache before writing the pulled snapshot
-- refreshes live usage immediately after the import, then prints the latest account list
+- refreshes live usage for subscription accounts immediately after the import, then prints the latest account list
+- API accounts are restored together with their managed provider config and are not refreshed for quota
 - if the key is wrong, `pull` fails with a decryption error instead of importing partial data
 - `--path <repo_path>`: read from a different repository subdirectory; it must stay relative and must not contain `..`
 - if `--path` is omitted, `SCODEX_POOL_PATH` is used when set
@@ -212,7 +219,8 @@ scodex pull [-i <identity_file>] [--path <repo_path>] <repo>
 scodex list
 ```
 
-- refreshes live usage first, then prints the latest account quota snapshot
+- refreshes live usage for subscription accounts first, then prints the latest account snapshot
+- the table includes a `Type` column: `SUBSCRIPTION` accounts have quota data, `API` accounts show `N/A` for 5h, Weekly, and ResetOn
 
 ### `refresh`
 
@@ -220,7 +228,8 @@ scodex list
 scodex refresh
 ```
 
-- calls the live usage API for all known accounts
+- calls the live usage API for known subscription accounts
+- skips API accounts because they do not have subscription quota windows
 - prints the refreshed account list immediately after the API calls finish
 - the current Rust release refreshes usage in parallel
 

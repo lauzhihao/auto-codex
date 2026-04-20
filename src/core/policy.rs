@@ -8,6 +8,7 @@ pub fn choose_best_account<'a>(state: &'a State) -> Option<&'a AccountRecord> {
     let mut candidates: Vec<((i64, i64, i64, f64, i64, i64), &AccountRecord)> = state
         .accounts
         .iter()
+        .filter(|account| account.is_subscription())
         .filter_map(|account| {
             let usage = state.usage_cache.get(&account.id)?;
             if usage.needs_relogin || usage.last_sync_error.is_some() {
@@ -37,12 +38,17 @@ pub fn choose_current_account<'a>(
     let account = state
         .accounts
         .iter()
+        .filter(|account| account.is_subscription())
         .find(|account| identity_matches(account, live))?;
     let usage = state.usage_cache.get(&account.id)?;
     is_current_account_usable(usage).then_some(account)
 }
 
 pub fn identity_matches(account: &AccountRecord, live: &LiveIdentity) -> bool {
+    if live.scodex_account_id.as_deref() == Some(account.id.as_str()) {
+        return true;
+    }
+
     if account.email.eq_ignore_ascii_case(&live.email) {
         return true;
     }
@@ -126,7 +132,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{choose_best_account, choose_current_account, is_current_account_usable};
-    use crate::core::state::{AccountRecord, LiveIdentity, State, UsageSnapshot};
+    use crate::core::state::{AccountRecord, AccountType, LiveIdentity, State, UsageSnapshot};
 
     #[test]
     fn keeps_current_account_when_threshold_is_met() {
@@ -173,6 +179,7 @@ mod tests {
             Some(&LiveIdentity {
                 email: "current@example.com".into(),
                 account_id: None,
+                scodex_account_id: None,
             }),
         );
 
@@ -188,6 +195,50 @@ mod tests {
         };
 
         assert!(!is_current_account_usable(&usage));
+    }
+
+    #[test]
+    fn best_account_ignores_api_accounts() {
+        let state = State {
+            version: 1,
+            accounts: vec![
+                AccountRecord {
+                    id: "api".into(),
+                    account_type: AccountType::Api,
+                    email: "56wxyz@openrouter".into(),
+                    updated_at: 100,
+                    ..AccountRecord::default()
+                },
+                AccountRecord {
+                    id: "subscription".into(),
+                    email: "subscription@example.com".into(),
+                    updated_at: 1,
+                    ..AccountRecord::default()
+                },
+            ],
+            usage_cache: BTreeMap::from([
+                (
+                    "api".into(),
+                    UsageSnapshot {
+                        five_hour_remaining_percent: Some(100),
+                        weekly_remaining_percent: Some(100),
+                        ..UsageSnapshot::default()
+                    },
+                ),
+                (
+                    "subscription".into(),
+                    UsageSnapshot {
+                        five_hour_remaining_percent: Some(25),
+                        weekly_remaining_percent: Some(20),
+                        ..UsageSnapshot::default()
+                    },
+                ),
+            ]),
+        };
+
+        let best = choose_best_account(&state);
+
+        assert_eq!(best.map(|item| item.id.as_str()), Some("subscription"));
     }
 
     #[test]
