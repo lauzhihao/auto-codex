@@ -177,10 +177,12 @@ scodex push [-i <identity_file>] [--path <repo_path>] <repo>
 - clones `<repo>` with your existing Git credentials
 - requires `SCODEX_POOL_KEY` in the environment and derives a symmetric encryption key from it
 - exports the local account pool into `.scodex-account-pool/bundle.enc.json` by default
+- stores local managed account state under `~/.scodex` by default
 - the repository only stores the encrypted bundle; account auth files are not committed in plaintext
 - always pushes the current local snapshot as the source of truth; it does not merge remote account-pool history
 - commits and pushes only when the exported bundle changed
 - `--path <repo_path>`: use a different repository subdirectory; it must stay relative and must not contain `..`
+- if `--path` is omitted, `SCODEX_POOL_PATH` is used when set
 - `-i <identity_file>`: pass an SSH private key to git via `GIT_SSH_COMMAND` for SSH-based remotes
 - if `git` is missing, `scodex` prints an install hint instead of trying to install it for you
 - if the repository is private and access fails, `scodex` tells you to check the repo URL plus your Git credentials, SSH key, or PAT
@@ -195,11 +197,13 @@ scodex pull [-i <identity_file>] [--path <repo_path>] <repo>
 - clones `<repo>` with your existing Git credentials
 - requires the same `SCODEX_POOL_KEY` used during `push`
 - reads the encrypted account pool from `.scodex-account-pool/bundle.enc.json` by default
+- writes the pulled local account pool into `~/.scodex` by default
 - force-overwrites the local account pool with the remote snapshot instead of merging
 - clears old local account homes and resets local usage cache before writing the pulled snapshot
 - refreshes live usage immediately after the import, then prints the latest account list
 - if the key is wrong, `pull` fails with a decryption error instead of importing partial data
 - `--path <repo_path>`: read from a different repository subdirectory; it must stay relative and must not contain `..`
+- if `--path` is omitted, `SCODEX_POOL_PATH` is used when set
 - `-i <identity_file>`: pass an SSH private key to git via `GIT_SSH_COMMAND` for SSH-based remotes
 
 ### `list`

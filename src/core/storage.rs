@@ -7,28 +7,38 @@ use directories::BaseDirs;
 
 use crate::core::state::State;
 
-const DEFAULT_STATE_BASENAME: &str = "auto-codex";
-const LEGACY_STATE_BASENAME: &str = "codex-autoswitch";
+const DEFAULT_STATE_BASENAME: &str = "scodex";
+const STATE_DIR_ENV: &str = "SCODEX_HOME";
 
 pub fn resolve_state_dir(override_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_dir {
         return Ok(expand_user_path(path));
     }
 
-    for env_name in ["AUTO_CODEX_HOME", "CODEX_AUTOSWITCH_HOME"] {
-        if let Some(value) = env::var_os(env_name) {
-            return Ok(expand_user_path(Path::new(&value)));
-        }
+    if let Some(path) = configured_state_dir_from_env() {
+        return Ok(path);
+    }
+
+    default_state_dir()
+}
+
+fn configured_state_dir_from_env() -> Option<PathBuf> {
+    env::var_os(STATE_DIR_ENV).map(|value| expand_user_path(Path::new(&value)))
+}
+
+fn default_state_dir() -> Result<PathBuf> {
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        return Ok(home.join(format!(".{DEFAULT_STATE_BASENAME}")));
     }
 
     let base_dirs =
         BaseDirs::new().context("unable to resolve base directories for current user")?;
-    let root = base_dirs.data_local_dir().to_path_buf();
-    let legacy_dir = root.join(LEGACY_STATE_BASENAME);
-    if legacy_dir.exists() {
-        return Ok(legacy_dir);
-    }
-    Ok(root.join(DEFAULT_STATE_BASENAME))
+    Ok(default_state_dir_for_home(None, base_dirs.data_local_dir()))
+}
+
+fn default_state_dir_for_home(home: Option<&Path>, data_local_dir: &Path) -> PathBuf {
+    home.map(|home| home.join(format!(".{DEFAULT_STATE_BASENAME}")))
+        .unwrap_or_else(|| data_local_dir.join(DEFAULT_STATE_BASENAME))
 }
 
 pub fn load_state(state_dir: &Path) -> Result<State> {
@@ -119,4 +129,23 @@ pub fn ensure_exists(path: &Path, label: &str) -> Result<()> {
         return Ok(());
     }
     bail!("{label} not found: {}", path.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::default_state_dir_for_home;
+
+    #[test]
+    fn default_state_dir_prefers_home_hidden_directory() {
+        let path = default_state_dir_for_home(Some(Path::new("/tmp/home")), Path::new("/tmp/data"));
+        assert_eq!(path, Path::new("/tmp/home/.scodex"));
+    }
+
+    #[test]
+    fn default_state_dir_falls_back_to_data_directory_without_home() {
+        let path = default_state_dir_for_home(None, Path::new("/tmp/data"));
+        assert_eq!(path, Path::new("/tmp/data/scodex"));
+    }
 }

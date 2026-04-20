@@ -177,10 +177,12 @@ scodex push [-i <identity_file>] [--path <repo_path>] <repo>
 - 会用你现有的 Git 凭据克隆 `<repo>`
 - 需要先在环境变量里设置 `SCODEX_POOL_KEY`，并基于它派生对称加密密钥
 - 默认把本地账号池导出到 `.scodex-account-pool/bundle.enc.json`
+- 默认把本地托管账号状态保存到 `~/.scodex`
 - 仓库里只保存加密后的 bundle，不会明文提交账号 `auth.json`
 - 始终以当前本地快照为准全量覆盖远端，不会 merge 远端旧账号池
 - 只有导出的账号池真的发生变化时，才会提交并推送
 - `--path <repo_path>`：改用仓库内的其他子目录；必须是相对路径，且不能包含 `..`
+- 如果未传 `--path`，且设置了 `SCODEX_POOL_PATH`，则优先使用该环境变量
 - `-i <identity_file>`：通过 `GIT_SSH_COMMAND` 把 SSH 私钥传给 git，用于 SSH 协议的仓库
 - 如果缺少 `git`，`scodex` 只会给出安装提示，不会强制替你安装
 - 如果私有仓库访问失败，`scodex` 会明确提示你检查仓库 URL，以及 Git 凭据、SSH key 或 PAT
@@ -195,11 +197,13 @@ scodex pull [-i <identity_file>] [--path <repo_path>] <repo>
 - 会用你现有的 Git 凭据克隆 `<repo>`
 - 需要使用和 `push` 时完全相同的 `SCODEX_POOL_KEY`
 - 默认从 `.scodex-account-pool/bundle.enc.json` 读取加密后的账号池
+- 默认把拉取后的本地账号池写入 `~/.scodex`
 - 会直接用远端快照覆盖本地账号池，不做 merge
 - 写入前会清空旧的本地账号目录，并重置本地 usage cache
 - 导入完成后会立即刷新实时额度，并打印最新账号列表
 - 如果密钥不对，会直接报解密失败，不会导入半套数据
 - `--path <repo_path>`：改用仓库内的其他子目录；必须是相对路径，且不能包含 `..`
+- 如果未传 `--path`，且设置了 `SCODEX_POOL_PATH`，则优先使用该环境变量
 - `-i <identity_file>`：通过 `GIT_SSH_COMMAND` 把 SSH 私钥传给 git，用于 SSH 协议的仓库
 
 ### `list`

@@ -96,8 +96,8 @@ pub struct DeployArgs {
 
 #[derive(Debug, Args)]
 pub struct RepoSyncArgs {
-    #[arg(long, default_value = ".scodex-account-pool", value_name = "REPO_PATH")]
-    pub path: String,
+    #[arg(long, value_name = "REPO_PATH")]
+    pub path: Option<String>,
 
     #[arg(short = 'i', value_name = "IDENTITY_FILE")]
     pub identity_file: Option<PathBuf>,
@@ -294,7 +294,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             let outcome = adapter.push_account_pool(
                 &state,
                 &args.repo,
-                Some(&args.path),
+                args.path.as_deref(),
                 args.identity_file.as_deref(),
             )?;
             if outcome.changed {
@@ -312,7 +312,7 @@ pub fn run(cli: Cli) -> Result<i32> {
                 &state_dir,
                 &mut state,
                 &args.repo,
-                Some(&args.path),
+                args.path.as_deref(),
                 args.identity_file.as_deref(),
             )?;
             storage::save_state(&state_dir, &state)?;
@@ -737,6 +737,11 @@ fn render_help_en(topic: HelpTopic) -> String {
                 "  SCODEX_POOL_KEY  Symmetric key source for encrypting the account pool"
             )
             .unwrap();
+            writeln!(
+                &mut out,
+                "  SCODEX_POOL_PATH Repository subdirectory used for the account pool when --path is omitted"
+            )
+            .unwrap();
             writeln!(&mut out, "  -h, --help            Print help").unwrap();
         }
         HelpTopic::Pull => {
@@ -765,6 +770,11 @@ fn render_help_en(topic: HelpTopic) -> String {
             writeln!(
                 &mut out,
                 "  SCODEX_POOL_KEY  Symmetric key source for decrypting the account pool"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "  SCODEX_POOL_PATH Repository subdirectory used for the account pool when --path is omitted"
             )
             .unwrap();
             writeln!(&mut out, "  -h, --help            Print help").unwrap();
@@ -1004,6 +1014,11 @@ fn render_help_zh(topic: HelpTopic) -> String {
             .unwrap();
             writeln!(&mut out, "环境变量：").unwrap();
             writeln!(&mut out, "  SCODEX_POOL_KEY  用于加密账号池的对称密钥来源").unwrap();
+            writeln!(
+                &mut out,
+                "  SCODEX_POOL_PATH 未传 --path 时，仓库内账号池子目录来源"
+            )
+            .unwrap();
             writeln!(&mut out, "  -h, --help            显示帮助").unwrap();
         }
         HelpTopic::Pull => {
@@ -1026,6 +1041,11 @@ fn render_help_zh(topic: HelpTopic) -> String {
             .unwrap();
             writeln!(&mut out, "环境变量：").unwrap();
             writeln!(&mut out, "  SCODEX_POOL_KEY  用于解密账号池的对称密钥来源").unwrap();
+            writeln!(
+                &mut out,
+                "  SCODEX_POOL_PATH 未传 --path 时，仓库内账号池子目录来源"
+            )
+            .unwrap();
             writeln!(&mut out, "  -h, --help            显示帮助").unwrap();
         }
         HelpTopic::Use => {
