@@ -159,6 +159,7 @@ install_shim_scripts() {
 
   cat > "${SHIM_PATH}" <<'EOF'
 #!/usr/bin/env bash
+# scodex shim v1
 SCODEX_HOME="${SCODEX_HOME:-$HOME/.scodex}"
 exec "$SCODEX_HOME/bin/scodex" "$@"
 EOF

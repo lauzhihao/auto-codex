@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use self::auth::decode_identity;
 use self::paths::{codex_home, codex_install_command, find_codex_bin, find_runtime_program};
-use crate::adapters::{AdapterCapabilities, CliAdapter};
 use crate::core::policy::{
     choose_best_account, choose_current_account, choose_current_api_account,
 };
@@ -30,6 +29,34 @@ mod usage;
 
 pub use device_autofill::AutofillRequest;
 
+// RAII guard：无论成功失败都清理临时目录
+struct TmpDirGuard(PathBuf);
+
+impl Drop for TmpDirGuard {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_dir_all(&self.0) {
+            if self.0.exists() {
+                eprintln!(
+                    "warning: failed to clean tmp login home {}: {e}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
+
+/// 在 state_dir/.tmp 下创建带 uuid 的临时目录，调用 f，结束后（成功或失败）自动清理。
+fn with_tmp_login_home<R>(state_dir: &Path, f: impl FnOnce(&Path) -> Result<R>) -> Result<R> {
+    let temp_root = state_dir.join(".tmp");
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed to create {}", temp_root.display()))?;
+    let tmp_home = temp_root.join(format!("scodex-login-{}", Uuid::new_v4()));
+    fs::create_dir_all(&tmp_home)
+        .with_context(|| format!("failed to create {}", tmp_home.display()))?;
+    let _guard = TmpDirGuard(tmp_home.clone());
+    f(&tmp_home)
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiLoginRequest {
     pub api_token: String,
@@ -39,24 +66,6 @@ pub struct ApiLoginRequest {
 
 #[derive(Debug, Default)]
 pub struct CodexAdapter;
-
-impl CliAdapter for CodexAdapter {
-    fn id(&self) -> &'static str {
-        "codex"
-    }
-
-    fn capabilities(&self) -> AdapterCapabilities {
-        AdapterCapabilities {
-            import_known: true,
-            read_current_identity: true,
-            switch_account: true,
-            login: true,
-            launch: true,
-            resume: true,
-            live_usage: true,
-        }
-    }
-}
 
 impl CodexAdapter {
     pub fn read_live_identity(&self) -> Option<LiveIdentity> {
@@ -69,7 +78,7 @@ impl CodexAdapter {
             });
         }
 
-        let auth_path = codex_home().join("auth.json");
+        let auth_path = home.join("auth.json");
         let auth = self.read_auth_json(&auth_path).ok()?;
         decode_identity(&auth).ok().map(Into::into)
     }
@@ -146,38 +155,30 @@ impl CodexAdapter {
     ) -> Result<AccountRecord> {
         let ui = core_ui::messages();
         let codex_bin = self.resolve_codex_bin()?;
-        let temp_root = state_dir.join(".tmp");
-        fs::create_dir_all(&temp_root)
-            .with_context(|| format!("failed to create {}", temp_root.display()))?;
-        let tmp_home = temp_root.join(format!("scodex-login-{}", Uuid::new_v4()));
-        fs::create_dir_all(&tmp_home)
-            .with_context(|| format!("failed to create {}", tmp_home.display()))?;
 
         println!("{}", ui.login_start());
         println!("{}", ui.login_open_url());
         println!("{}", ui.login_headless_ip(&detect_local_ip()));
         println!();
 
-        let status = Command::new(&codex_bin)
-            .arg("login")
-            .arg("--device-auth")
-            .env("CODEX_HOME", &tmp_home)
-            .status()
-            .with_context(|| format!("failed to execute {}", codex_bin.display()))?;
-        if !status.success() {
-            let _ = fs::remove_dir_all(&tmp_home);
-            bail!("{}", ui.codex_login_failed(status.code().unwrap_or(1)));
-        }
+        with_tmp_login_home(state_dir, |tmp_home| {
+            let status = Command::new(&codex_bin)
+                .arg("login")
+                .arg("--device-auth")
+                .env("CODEX_HOME", tmp_home)
+                .status()
+                .with_context(|| format!("failed to execute {}", codex_bin.display()))?;
+            if !status.success() {
+                bail!("{}", ui.codex_login_failed(status.code().unwrap_or(1)));
+            }
 
-        let auth_path = tmp_home.join("auth.json");
-        if !auth_path.exists() {
-            let _ = fs::remove_dir_all(&tmp_home);
-            bail!("{}", ui.login_missing_auth());
-        }
+            let auth_path = tmp_home.join("auth.json");
+            if !auth_path.exists() {
+                bail!("{}", ui.login_missing_auth());
+            }
 
-        let record = self.import_auth_path(state_dir, state, &tmp_home)?;
-        let _ = fs::remove_dir_all(&tmp_home);
-        Ok(record)
+            self.import_auth_path(state_dir, state, tmp_home)
+        })
     }
 
     pub fn run_device_auth_login_autofill(
@@ -188,30 +189,19 @@ impl CodexAdapter {
     ) -> Result<AccountRecord> {
         let ui = core_ui::messages();
         let codex_bin = self.resolve_codex_bin()?;
-        let temp_root = state_dir.join(".tmp");
-        fs::create_dir_all(&temp_root)
-            .with_context(|| format!("failed to create {}", temp_root.display()))?;
-        let tmp_home = temp_root.join(format!("scodex-login-{}", Uuid::new_v4()));
-        fs::create_dir_all(&tmp_home)
-            .with_context(|| format!("failed to create {}", tmp_home.display()))?;
 
         println!("{}", ui.login_autofill_start());
 
-        let run = device_autofill::run_device_autofill_login(&codex_bin, &tmp_home, &request);
-        if let Err(error) = run {
-            let _ = fs::remove_dir_all(&tmp_home);
-            return Err(error);
-        }
+        with_tmp_login_home(state_dir, |tmp_home| {
+            device_autofill::run_device_autofill_login(&codex_bin, tmp_home, &request)?;
 
-        let auth_path = tmp_home.join("auth.json");
-        if !auth_path.exists() {
-            let _ = fs::remove_dir_all(&tmp_home);
-            bail!("{}", ui.login_missing_auth());
-        }
+            let auth_path = tmp_home.join("auth.json");
+            if !auth_path.exists() {
+                bail!("{}", ui.login_missing_auth());
+            }
 
-        let record = self.import_auth_path(state_dir, state, &tmp_home)?;
-        let _ = fs::remove_dir_all(&tmp_home);
-        Ok(record)
+            self.import_auth_path(state_dir, state, tmp_home)
+        })
     }
 
     pub fn run_api_key_login(
@@ -403,12 +393,15 @@ fn has_resumable_session_under(root: &Path, target: &str) -> bool {
         if path.extension().and_then(|item| item.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(contents) = fs::read_to_string(&path) else {
+        let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        let Some(first_line) = contents.lines().next() else {
+        let mut reader = BufReader::new(file);
+        let mut first_line = String::new();
+        if reader.read_line(&mut first_line).is_err() || first_line.is_empty() {
             continue;
-        };
+        }
+        let first_line = first_line.trim_end_matches('\n').trim_end_matches('\r');
         let Ok(record) = serde_json::from_str::<Value>(first_line) else {
             continue;
         };
@@ -429,8 +422,8 @@ fn has_resumable_session_under(root: &Path, target: &str) -> bool {
 fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+        .expect("system clock before UNIX_EPOCH")
+        .as_secs() as i64
 }
 
 fn detect_local_ip() -> String {
@@ -458,7 +451,7 @@ mod tests {
 
     use super::{
         ApiLoginRequest, CodexAdapter, build_codex_launch_command, has_resumable_session_under,
-        parse_yes_no,
+        parse_yes_no, with_tmp_login_home,
     };
     use crate::core::state::{AccountType, State};
 
@@ -538,6 +531,92 @@ mod tests {
         assert_eq!(record.api_provider.as_deref(), Some("openrouter"));
         assert_eq!(state.accounts.len(), 1);
         fs::remove_dir_all(&tmp)?;
+        Ok(())
+    }
+
+    // 验证大文件场景下 has_resumable_session_under 仅读首行即返回，不全量加载
+    #[test]
+    fn has_resumable_session_under_large_file_returns_correct_result() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("scodex-large-session-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp)?;
+
+        let cwd = "/fake/project/path";
+        let session_file = tmp.join("session.jsonl");
+
+        // 首行：有效的 session_meta
+        let first_line = serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "originator": "codex-tui",
+                "cwd": cwd,
+            }
+        })
+        .to_string();
+
+        // 构造 10000 行的大文件
+        let mut content = first_line + "\n";
+        let padding_line =
+            serde_json::json!({"type": "message", "data": "x".repeat(200)}).to_string();
+        for _ in 0..9999 {
+            content.push_str(&padding_line);
+            content.push('\n');
+        }
+        fs::write(&session_file, &content)?;
+
+        // 函数必须正确识别 cwd，且不因大文件崩溃/超时
+        assert!(has_resumable_session_under(&tmp, cwd));
+        // 不匹配的 cwd 返回 false
+        assert!(!has_resumable_session_under(&tmp, "/other/path"));
+
+        fs::remove_dir_all(&tmp)?;
+        Ok(())
+    }
+
+    // 验证 with_tmp_login_home：闭包成功时 tmp_home 已被清理
+    #[test]
+    fn with_tmp_login_home_cleans_up_on_success() -> Result<()> {
+        let state_dir = std::env::temp_dir().join(format!("scodex-wth-ok-{}", Uuid::new_v4()));
+        let mut captured_tmp = std::path::PathBuf::new();
+
+        let result: Result<i32> = with_tmp_login_home(&state_dir, |tmp_home| {
+            captured_tmp = tmp_home.to_path_buf();
+            // 确认目录在闭包内存在
+            assert!(tmp_home.exists(), "tmp_home should exist inside closure");
+            Ok(42)
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+        // guard drop 后目录必须不存在
+        assert!(
+            !captured_tmp.exists(),
+            "tmp_home should be cleaned up after success"
+        );
+
+        let _ = fs::remove_dir_all(&state_dir);
+        Ok(())
+    }
+
+    // 验证 with_tmp_login_home：闭包返回 Err 时 tmp_home 也被清理
+    #[test]
+    fn with_tmp_login_home_cleans_up_on_error() -> Result<()> {
+        let state_dir = std::env::temp_dir().join(format!("scodex-wth-err-{}", Uuid::new_v4()));
+        let mut captured_tmp = std::path::PathBuf::new();
+
+        let result: Result<i32> = with_tmp_login_home(&state_dir, |tmp_home| {
+            captured_tmp = tmp_home.to_path_buf();
+            assert!(tmp_home.exists(), "tmp_home should exist inside closure");
+            anyhow::bail!("simulated login failure");
+        });
+
+        assert!(result.is_err());
+        // 即使闭包出错，guard drop 后目录必须不存在
+        assert!(
+            !captured_tmp.exists(),
+            "tmp_home should be cleaned up after error"
+        );
+
+        let _ = fs::remove_dir_all(&state_dir);
         Ok(())
     }
 }

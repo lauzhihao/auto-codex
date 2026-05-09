@@ -24,3 +24,4 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 unicode-width = "0.2"
 uuid = { version = "1.18", features = ["v4"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+toml = "1.1.2"

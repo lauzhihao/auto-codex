@@ -25,6 +25,11 @@ const BUNDLE_DIR_ENV: &str = "SCODEX_POOL_PATH";
 const LEGACY_BUNDLE_DIR_ENVS: [&str; 2] = ["AUTO_CODEX_POOL_PATH", "CODEX_AUTOSWITCH_POOL_PATH"];
 const BUNDLE_ALGORITHM: &str = "xchacha20poly1305-sha256";
 
+// PBKDF2 参数：≥100_000 次迭代，16 字节随机 salt
+const KDF_VERSION: u32 = 2;
+const KDF_ITERATIONS: u32 = 100_000;
+const KDF_SALT_LEN: usize = 16;
+
 impl CodexAdapter {
     pub fn push_account_pool(
         &self,
@@ -45,7 +50,7 @@ impl CodexAdapter {
         }
         validate_identity_file(identity_file)?;
         let bundle_dir = resolve_bundle_dir(bundle_dir)?;
-        let bundle_key = resolve_bundle_key()?;
+        let bundle_key_raw = resolve_bundle_key_raw()?;
         let checkout = clone_repo(&git_bin, repo, identity_file)?;
         let bundle_root = checkout.checkout_dir.join(&bundle_dir);
         let bundle_path = bundle_root.join(BUNDLE_FILENAME);
@@ -54,7 +59,7 @@ impl CodexAdapter {
 
         println!("{}", ui.repo_push_start(repo));
         if bundle_path.exists() {
-            let existing = decrypt_bundle_file(&bundle_path, &bundle_key)?;
+            let existing = decrypt_bundle_file(&bundle_path, &bundle_key_raw)?;
             if existing == bundle_bytes {
                 return Ok(PushOutcome {
                     changed: false,
@@ -64,7 +69,7 @@ impl CodexAdapter {
         }
 
         prepare_bundle_dir(&bundle_root)?;
-        write_bundle_file(&bundle_path, &bundle_bytes, &bundle_key)?;
+        write_bundle_file(&bundle_path, &bundle_bytes, &bundle_key_raw)?;
 
         git_add(&git_bin, &checkout.checkout_dir, &bundle_dir)?;
         if !git_has_changes(&git_bin, &checkout.checkout_dir, &bundle_dir)? {
@@ -99,7 +104,7 @@ impl CodexAdapter {
         }
         validate_identity_file(identity_file)?;
         let bundle_dir = resolve_bundle_dir(bundle_dir)?;
-        let bundle_key = resolve_bundle_key()?;
+        let bundle_key_raw = resolve_bundle_key_raw()?;
         let checkout = clone_repo(&git_bin, repo, identity_file)?;
         let bundle_root = checkout.checkout_dir.join(&bundle_dir);
         let bundle_path = bundle_root.join(BUNDLE_FILENAME);
@@ -113,7 +118,7 @@ impl CodexAdapter {
         }
 
         let bundle: RepoBundle =
-            serde_json::from_slice(&decrypt_bundle_file(&bundle_path, &bundle_key)?)
+            serde_json::from_slice(&decrypt_bundle_file(&bundle_path, &bundle_key_raw)?)
                 .context("failed to parse decrypted account-pool bundle")?;
         if bundle.accounts.is_empty() {
             bail!(
@@ -167,12 +172,23 @@ struct RepoBundleAccount {
     config_toml: Option<String>,
 }
 
+/// bundle.enc.json 顶层 kdf 字段，v2 使用 PBKDF2-HMAC-SHA256
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct KdfParams {
+    version: u32,
+    salt_b64: String,
+    iterations: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct EncryptedBundleFile {
     version: u32,
     algorithm: String,
     nonce_b64: String,
     ciphertext_b64: String,
+    /// 缺失表示旧 v1 bundle（SHA-256 直接派生）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kdf: Option<KdfParams>,
 }
 
 fn build_repo_bundle(state: &State) -> Result<RepoBundle> {
@@ -237,24 +253,31 @@ fn prepare_bundle_dir(bundle_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_bundle_file(path: &Path, plaintext: &[u8], bundle_key: &[u8; 32]) -> Result<()> {
-    let encrypted = encrypt_bundle_bytes(plaintext, bundle_key)?;
+fn write_bundle_file(path: &Path, plaintext: &[u8], bundle_key_raw: &str) -> Result<()> {
+    let encrypted = encrypt_bundle_bytes(plaintext, bundle_key_raw)?;
     let mut bytes = serde_json::to_vec_pretty(&encrypted)?;
     bytes.push(b'\n');
     fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    // 限制 bundle 文件权限，防止其他用户读取
+    set_file_mode_600(path)?;
     Ok(())
 }
 
-fn decrypt_bundle_file(path: &Path, bundle_key: &[u8; 32]) -> Result<Vec<u8>> {
+fn decrypt_bundle_file(path: &Path, bundle_key_raw: &str) -> Result<Vec<u8>> {
     let contents =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let encrypted: EncryptedBundleFile = serde_json::from_str(&contents)
         .with_context(|| format!("invalid encrypted bundle file: {}", path.display()))?;
-    decrypt_bundle_bytes(&encrypted, bundle_key)
+    decrypt_bundle_bytes(&encrypted, bundle_key_raw)
 }
 
-fn encrypt_bundle_bytes(plaintext: &[u8], bundle_key: &[u8; 32]) -> Result<EncryptedBundleFile> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(bundle_key));
+/// 加密时：生成随机 salt → PBKDF2 派生密钥 → 写 kdf 元信息到 bundle
+fn encrypt_bundle_bytes(plaintext: &[u8], bundle_key_raw: &str) -> Result<EncryptedBundleFile> {
+    let mut salt = [0u8; KDF_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    let key = derive_bundle_key_v2(bundle_key_raw, &salt, KDF_ITERATIONS);
+
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
     let ciphertext = cipher
@@ -266,10 +289,18 @@ fn encrypt_bundle_bytes(plaintext: &[u8], bundle_key: &[u8; 32]) -> Result<Encry
         algorithm: BUNDLE_ALGORITHM.into(),
         nonce_b64: BASE64_STANDARD.encode(nonce),
         ciphertext_b64: BASE64_STANDARD.encode(ciphertext),
+        kdf: Some(KdfParams {
+            version: KDF_VERSION,
+            salt_b64: BASE64_STANDARD.encode(salt),
+            iterations: KDF_ITERATIONS,
+        }),
     })
 }
 
-fn decrypt_bundle_bytes(encrypted: &EncryptedBundleFile, bundle_key: &[u8; 32]) -> Result<Vec<u8>> {
+/// 解密时：读 kdf.version 决定派生路径
+/// - kdf 缺失 或 version=1 → 旧 SHA-256 路径（兼容旧 bundle）
+/// - version=2 → PBKDF2-HMAC-SHA256
+fn decrypt_bundle_bytes(encrypted: &EncryptedBundleFile, bundle_key_raw: &str) -> Result<Vec<u8>> {
     if encrypted.version != 1 || encrypted.algorithm != BUNDLE_ALGORITHM {
         bail!(
             "{}",
@@ -290,29 +321,120 @@ fn decrypt_bundle_bytes(encrypted: &EncryptedBundleFile, bundle_key: &[u8; 32]) 
         );
     }
 
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(bundle_key));
+    // 根据 kdf 字段决定密钥派生方式
+    let key: [u8; 32] = match &encrypted.kdf {
+        Some(kdf) if kdf.version == KDF_VERSION => {
+            let salt = BASE64_STANDARD.decode(&kdf.salt_b64).map_err(|_| {
+                anyhow!(core_ui::messages().repo_sync_decrypt_failed(BUNDLE_KEY_ENV))
+            })?;
+            derive_bundle_key_v2(bundle_key_raw, &salt, kdf.iterations)
+        }
+        // 缺失或 version != 2：兼容旧 v1 SHA-256 路径
+        _ => derive_bundle_key_v1(bundle_key_raw),
+    };
+
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
     cipher
         .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
         .map_err(|_| anyhow!(core_ui::messages().repo_sync_decrypt_failed(BUNDLE_KEY_ENV)))
 }
 
-fn resolve_bundle_key() -> Result<[u8; 32]> {
-    resolve_bundle_key_from_value(env::var(BUNDLE_KEY_ENV).ok())
-}
-
-fn resolve_bundle_key_from_value(value: Option<String>) -> Result<[u8; 32]> {
-    let value = value
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-        .ok_or_else(|| anyhow!(core_ui::messages().repo_sync_missing_key(BUNDLE_KEY_ENV)))?;
-    Ok(derive_bundle_key(&value))
-}
-
-fn derive_bundle_key(secret: &str) -> [u8; 32] {
+/// v1 兼容路径：SHA-256 直接派生（无 salt，弱）
+fn derive_bundle_key_v1(secret: &str) -> [u8; 32] {
     let digest = Sha256::digest(secret.as_bytes());
     let mut key = [0u8; 32];
     key.copy_from_slice(&digest);
     key
+}
+
+/// v2：PBKDF2-HMAC-SHA256，带 salt 和迭代次数
+///
+/// 使用 sha2 0.10 手动实现 HMAC-SHA256（RFC 2104）和 PBKDF2（RFC 2898）。
+/// pbkdf2 crate 0.13 需要 digest 0.11，与项目依赖的 sha2 0.10（digest 0.10）版本不兼容，
+/// 故直接用 Sha256::digest 手动推算，避免引入第二个 digest 版本。
+fn derive_bundle_key_v2(secret: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
+    pbkdf2_hmac_sha256(secret.as_bytes(), salt, iterations)
+}
+
+/// HMAC-SHA256（RFC 2104）：用 sha2 0.10 / digest 0.10 实现
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    // 若 key 超过块大小则先哈希
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let h = Sha256::digest(key);
+        k[..32].copy_from_slice(&h);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let inner = {
+        let mut h = Sha256::new();
+        h.update(&ipad);
+        h.update(data);
+        h.finalize()
+    };
+    let mut h = Sha256::new();
+    h.update(&opad);
+    h.update(&inner);
+    let out = h.finalize();
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&out);
+    result
+}
+
+/// PBKDF2-HMAC-SHA256（RFC 2898），输出 32 字节
+fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    // 块编号 = 1（只需一个 32 字节块）
+    let mut salt_with_block = salt.to_vec();
+    salt_with_block.extend_from_slice(&1u32.to_be_bytes());
+
+    let mut u = hmac_sha256(password, &salt_with_block);
+    let mut result = u;
+    for _ in 1..iterations {
+        u = hmac_sha256(password, &u);
+        for (r, &ui) in result.iter_mut().zip(u.iter()) {
+            *r ^= ui;
+        }
+    }
+    result
+}
+
+/// Unix-only：写出后立即 chmod 0600，防止其他用户读取敏感文件
+fn set_file_mode_600(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod 0600 {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path; // Windows 不强制
+    }
+    Ok(())
+}
+
+fn resolve_bundle_key_raw() -> Result<String> {
+    resolve_bundle_key_raw_from_value(env::var(BUNDLE_KEY_ENV).ok())
+}
+
+fn resolve_bundle_key_raw_from_value(value: Option<String>) -> Result<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| anyhow!(core_ui::messages().repo_sync_missing_key(BUNDLE_KEY_ENV)))
+}
+
+// 保留旧名供测试兼容（测试模块内部用 v1 路径验证往返）
+#[cfg(test)]
+fn derive_bundle_key(secret: &str) -> [u8; 32] {
+    derive_bundle_key_v1(secret)
 }
 
 fn overwrite_local_account_pool(state_dir: &Path, bundle: &RepoBundle) -> Result<State> {
@@ -333,6 +455,8 @@ fn overwrite_local_account_pool(state_dir: &Path, bundle: &RepoBundle) -> Result
         let staged_auth = staged_home.join("auth.json");
         fs::write(&staged_auth, account.auth_json.as_bytes())
             .with_context(|| format!("failed to write {}", staged_auth.display()))?;
+        // 写入后立即限制 auth.json 权限
+        set_file_mode_600(&staged_auth)?;
 
         let final_home = state_dir.join("accounts").join(&account.id);
         let final_auth = final_home.join("auth.json");
@@ -392,8 +516,13 @@ fn clone_repo(git_bin: &Path, repo: &str, identity_file: Option<&Path>) -> Resul
     let checkout = RepoCheckout::new("scodex-git")?;
     let output = run_git(
         git_bin,
-        ["clone", "--depth", "1", repo],
-        Some(&checkout.checkout_dir),
+        &[
+            "clone",
+            "--depth",
+            "1",
+            repo,
+            &checkout.checkout_dir.to_string_lossy(),
+        ],
         None,
         identity_file,
     )?;
@@ -410,45 +539,87 @@ fn clone_repo(git_bin: &Path, repo: &str, identity_file: Option<&Path>) -> Resul
     Ok(checkout)
 }
 
-fn git_add(git_bin: &Path, checkout_dir: &Path, bundle_dir: &Path) -> Result<()> {
-    let output = run_git(
-        git_bin,
-        ["-C", ""],
-        None,
-        Some((
-            checkout_dir,
-            vec![
-                "add".into(),
-                "--all".into(),
-                "--".into(),
-                bundle_dir.display().to_string(),
-            ],
-        )),
-        None,
-    )?;
+/// 通用 git 子命令执行器：统一 fixed + dynamic 路径，消除歧义
+///
+/// - `args`：完整参数列表，由调用方组装
+/// - `checkout_dir`：若提供则在参数首位插入 `-C <dir>`
+fn run_git(
+    git_bin: &Path,
+    args: &[&str],
+    checkout_dir: Option<&Path>,
+    identity_file: Option<&Path>,
+) -> Result<Output> {
+    let mut command = Command::new(git_bin);
+    if let Some(dir) = checkout_dir {
+        command.arg("-C").arg(dir);
+    }
+    command.args(args);
+    if let Some(identity_file) = identity_file {
+        command.env("GIT_SSH_COMMAND", build_git_ssh_command(identity_file));
+    }
+    command
+        .output()
+        .with_context(|| format!("failed to execute {}", git_bin.display()))
+}
+
+/// git 子命令执行器：期望成功，失败时返回带 label 的错误
+///
+/// git_has_changes 因需解析 stdout 而单独保留；其余 git_* 薄包装此函数。
+fn run_git_expect_success(
+    label: &str,
+    git_bin: &Path,
+    args: &[&str],
+    checkout_dir: Option<&Path>,
+    identity_file: Option<&Path>,
+) -> Result<()> {
+    let output = run_git(git_bin, args, checkout_dir, identity_file)?;
     if !output.status.success() {
         bail!(
-            "{}",
-            core_ui::messages().repo_sync_stage_failed(output.status.code().unwrap_or(1))
+            "git {} failed (exit {}): {}",
+            label,
+            output.status.code().unwrap_or(1),
+            git_stderr(&output)
         );
     }
     Ok(())
 }
 
+fn git_add(git_bin: &Path, checkout_dir: &Path, bundle_dir: &Path) -> Result<()> {
+    run_git_expect_success(
+        "add",
+        git_bin,
+        &["add", "--all", "--", &bundle_dir.display().to_string()],
+        Some(checkout_dir),
+        None,
+    )
+    .map_err(|e| {
+        anyhow!(
+            "{}",
+            core_ui::messages().repo_sync_stage_failed(e.to_string().parse::<i32>().unwrap_or(1))
+        )
+    })
+    .or_else(|_| {
+        // 保留原始错误消息
+        run_git_expect_success(
+            "add",
+            git_bin,
+            &["add", "--all", "--", &bundle_dir.display().to_string()],
+            Some(checkout_dir),
+            None,
+        )
+    })
+}
+
 fn git_has_changes(git_bin: &Path, checkout_dir: &Path, bundle_dir: &Path) -> Result<bool> {
     let output = run_git(
         git_bin,
-        ["-C", ""],
-        None,
-        Some((
-            checkout_dir,
-            vec![
-                "status".into(),
-                "--porcelain".into(),
-                "--".into(),
-                bundle_dir.display().to_string(),
-            ],
-        )),
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            &bundle_dir.display().to_string(),
+        ],
+        Some(checkout_dir),
         None,
     )?;
     if !output.status.success() {
@@ -462,31 +633,22 @@ fn git_has_changes(git_bin: &Path, checkout_dir: &Path, bundle_dir: &Path) -> Re
 
 fn git_commit(git_bin: &Path, checkout_dir: &Path) -> Result<()> {
     let message = format!("scodex encrypted account pool sync {}", super::now_ts());
-    let output = run_git(
+    run_git_expect_success(
+        "commit",
         git_bin,
-        ["-C", ""],
+        &[
+            "-c",
+            "user.name=scodex",
+            "-c",
+            "user.email=scodex@local",
+            "commit",
+            "-m",
+            &message,
+        ],
+        Some(checkout_dir),
         None,
-        Some((
-            checkout_dir,
-            vec![
-                "-c".into(),
-                "user.name=scodex".into(),
-                "-c".into(),
-                "user.email=scodex@local".into(),
-                "commit".into(),
-                "-m".into(),
-                message,
-            ],
-        )),
-        None,
-    )?;
-    if !output.status.success() {
-        bail!(
-            "{}",
-            core_ui::messages().repo_sync_commit_failed(output.status.code().unwrap_or(1))
-        );
-    }
-    Ok(())
+    )
+    .map_err(|_| anyhow!("{}", core_ui::messages().repo_sync_commit_failed(1)))
 }
 
 fn git_push(
@@ -497,12 +659,8 @@ fn git_push(
 ) -> Result<()> {
     let output = run_git(
         git_bin,
-        ["-C", ""],
-        None,
-        Some((
-            checkout_dir,
-            vec!["push".into(), "origin".into(), "HEAD".into()],
-        )),
+        &["push", "origin", "HEAD"],
+        Some(checkout_dir),
         identity_file,
     )?;
     if !output.status.success() {
@@ -516,30 +674,6 @@ fn git_push(
         );
     }
     Ok(())
-}
-
-fn run_git<const N: usize>(
-    git_bin: &Path,
-    fixed_args: [&str; N],
-    clone_target: Option<&Path>,
-    dynamic: Option<(&Path, Vec<String>)>,
-    identity_file: Option<&Path>,
-) -> Result<Output> {
-    let mut command = Command::new(git_bin);
-    if let Some((checkout_dir, args)) = dynamic {
-        command.arg("-C").arg(checkout_dir).args(args);
-    } else {
-        command.args(fixed_args);
-        if let Some(clone_target) = clone_target {
-            command.arg(clone_target);
-        }
-    }
-    if let Some(identity_file) = identity_file {
-        command.env("GIT_SSH_COMMAND", build_git_ssh_command(identity_file));
-    }
-    command
-        .output()
-        .with_context(|| format!("failed to execute {}", git_bin.display()))
 }
 
 fn validate_identity_file(identity_file: Option<&Path>) -> Result<()> {
@@ -679,11 +813,13 @@ mod tests {
     use anyhow::Result;
 
     use super::{
-        RepoBundle, RepoBundleAccount, build_git_ssh_command, decrypt_bundle_bytes,
-        derive_bundle_key, encrypt_bundle_bytes, overwrite_local_account_pool, resolve_bundle_dir,
-        resolve_bundle_dir_source, resolve_bundle_key_from_value,
+        BASE64_STANDARD, BUNDLE_ALGORITHM, EncryptedBundleFile, RepoBundle, RepoBundleAccount,
+        build_git_ssh_command, decrypt_bundle_bytes, derive_bundle_key, derive_bundle_key_v1,
+        encrypt_bundle_bytes, overwrite_local_account_pool, resolve_bundle_dir,
+        resolve_bundle_dir_source, resolve_bundle_key_raw_from_value, set_file_mode_600,
     };
     use crate::core::state::AccountType;
+    use base64::Engine;
 
     #[test]
     fn bundle_dir_defaults_when_missing() -> Result<()> {
@@ -746,18 +882,19 @@ mod tests {
             }],
         };
         let plaintext = serde_json::to_vec(&bundle)?;
-        let key = derive_bundle_key("test-secret");
-        let wrong_key = derive_bundle_key("wrong-secret");
+        let _key = derive_bundle_key("test-secret");
 
-        let encrypted = encrypt_bundle_bytes(&plaintext, &key)?;
-        assert_eq!(decrypt_bundle_bytes(&encrypted, &key)?, plaintext);
-        assert!(decrypt_bundle_bytes(&encrypted, &wrong_key).is_err());
+        let encrypted = encrypt_bundle_bytes(&plaintext, "test-secret")?;
+        // 正确密钥可以解密
+        assert_eq!(decrypt_bundle_bytes(&encrypted, "test-secret")?, plaintext);
+        // 错误密钥解密失败（v2 路径下改变了密钥，AEAD 认证必然失败）
+        assert!(decrypt_bundle_bytes(&encrypted, "wrong-secret").is_err());
         Ok(())
     }
 
     #[test]
     fn resolve_bundle_key_requires_env_var() {
-        assert!(resolve_bundle_key_from_value(None).is_err());
+        assert!(resolve_bundle_key_raw_from_value(None).is_err());
     }
 
     #[test]
@@ -865,6 +1002,82 @@ mod tests {
         );
 
         fs::remove_dir_all(&state_dir)?;
+        Ok(())
+    }
+
+    // ── 新增测试 ──────────────────────────────────────────────────────────────
+
+    /// PBKDF2 v2 加解密往返：加密后能用同一密钥解密，错误密钥解密失败
+    #[test]
+    fn pbkdf2_v2_round_trip() -> Result<()> {
+        let plaintext = b"hello pbkdf2 world";
+        let secret = "super-secret-passphrase";
+
+        let encrypted = encrypt_bundle_bytes(plaintext, secret)?;
+        // kdf 字段必须存在且 version=2
+        let kdf = encrypted.kdf.as_ref().expect("kdf field must be present");
+        assert_eq!(kdf.version, 2);
+        assert_eq!(kdf.iterations, 100_000);
+        assert!(!kdf.salt_b64.is_empty());
+
+        // 正确密钥往返
+        let decrypted = decrypt_bundle_bytes(&encrypted, secret)?;
+        assert_eq!(decrypted, plaintext);
+
+        // 错误密钥应解密失败
+        assert!(decrypt_bundle_bytes(&encrypted, "wrong-pass").is_err());
+        Ok(())
+    }
+
+    /// v1 旧 bundle 兼容：用 SHA-256 直接派生的 bundle 新代码仍能解密
+    #[test]
+    fn v1_legacy_bundle_still_decryptable() -> Result<()> {
+        use chacha20poly1305::aead::Aead;
+        use chacha20poly1305::aead::{KeyInit, OsRng as AeadOsRng, rand_core::RngCore};
+        use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+
+        let secret = "legacy-secret";
+        let plaintext = b"legacy bundle content";
+
+        // 手工用旧 v1 SHA-256 路径构造 bundle（无 kdf 字段）
+        let key = derive_bundle_key_v1(secret);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let mut nonce_bytes = [0u8; 24];
+        AeadOsRng.fill_bytes(&mut nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(XNonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+
+        let legacy_bundle = EncryptedBundleFile {
+            version: 1,
+            algorithm: BUNDLE_ALGORITHM.into(),
+            nonce_b64: BASE64_STANDARD.encode(nonce_bytes),
+            ciphertext_b64: BASE64_STANDARD.encode(&ciphertext),
+            kdf: None, // 无 kdf 字段 → v1 兼容路径
+        };
+
+        let decrypted = decrypt_bundle_bytes(&legacy_bundle, secret)?;
+        assert_eq!(decrypted, plaintext);
+        Ok(())
+    }
+
+    /// Unix-only：写出文件后 chmod 0600 生效
+    #[cfg(unix)]
+    #[test]
+    fn chmod_0600_is_set_on_sensitive_file() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("scodex-chmod-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("auth.json");
+        fs::write(&path, b"{\"tokens\":{}}")?;
+
+        set_file_mode_600(&path)?;
+
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+
+        fs::remove_dir_all(&dir)?;
         Ok(())
     }
 }

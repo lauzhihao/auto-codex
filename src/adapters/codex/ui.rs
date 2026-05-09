@@ -1,12 +1,9 @@
-use std::env;
-use std::io::{self, IsTerminal};
-
 use chrono::{DateTime, Local, Utc};
 use unicode_width::UnicodeWidthStr;
 
 use super::CodexAdapter;
 use crate::core::state::{AccountRecord, AccountType, LiveIdentity, State, UsageSnapshot};
-use crate::core::ui as core_ui;
+use crate::core::ui::{self as core_ui, strip_ansi, style_enabled};
 
 impl CodexAdapter {
     pub fn render_account_table(&self, state: &State, active: Option<&LiveIdentity>) -> String {
@@ -109,15 +106,10 @@ fn active_matches(account: &AccountRecord, live: &LiveIdentity) -> bool {
 fn format_account_type(account: &AccountRecord) -> String {
     let ui = core_ui::messages();
     match account.account_type {
-        AccountType::Subscription => {
-            if ui.is_zh() {
-                "官方订阅".into()
-            } else {
-                "SUBSCRIPTION".into()
-            }
-        }
-        AccountType::Api => "API".into(),
+        AccountType::Subscription => ui.account_type_subscription(),
+        AccountType::Api => ui.account_type_api(),
     }
+    .to_string()
 }
 
 fn format_percent(value: Option<i64>) -> String {
@@ -137,6 +129,29 @@ fn format_quota_percent(value: Option<i64>) -> String {
     }
 }
 
+/// 从字符串解析时间戳（i64 epoch 或 RFC3339），返回本地时间的格式化字符串
+fn parse_timestamp_display(value: &str) -> Option<String> {
+    if let Ok(timestamp) = value.parse::<i64>() {
+        if let Some(parsed) = DateTime::<Utc>::from_timestamp(timestamp, 0) {
+            return Some(
+                parsed
+                    .with_timezone(&Local)
+                    .format("%m-%d %H:%M")
+                    .to_string(),
+            );
+        }
+    }
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Some(
+            parsed
+                .with_timezone(&Local)
+                .format("%m-%d %H:%M")
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn format_reset_on(value: Option<&str>) -> String {
     let ui = core_ui::messages();
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -148,21 +163,7 @@ fn format_reset_on(value: Option<&str>) -> String {
     {
         return ui.na().into();
     }
-    if let Ok(timestamp) = value.parse::<i64>() {
-        if let Some(parsed) = DateTime::<Utc>::from_timestamp(timestamp, 0) {
-            return parsed
-                .with_timezone(&Local)
-                .format("%m-%d %H:%M")
-                .to_string();
-        }
-    }
-    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
-        return parsed
-            .with_timezone(&Local)
-            .format("%m-%d %H:%M")
-            .to_string();
-    }
-    ui.na().into()
+    parse_timestamp_display(value).unwrap_or_else(|| ui.na().into())
 }
 
 fn format_account_status(usage: &UsageSnapshot) -> String {
@@ -394,31 +395,7 @@ fn align_cell(value: String, width: usize, align: &str) -> String {
 }
 
 fn visible_width(value: &str) -> usize {
-    UnicodeWidthStr::width(strip_ansi_codes(value).as_str())
-}
-
-fn strip_ansi_codes(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
-            chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-            continue;
-        }
-        result.push(ch);
-    }
-    result
-}
-
-fn style_enabled() -> bool {
-    io::stdout().is_terminal()
-        && env::var_os("NO_COLOR").is_none()
-        && !matches!(env::var("TERM").ok().as_deref(), Some("dumb"))
+    UnicodeWidthStr::width(strip_ansi(value).as_str())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -442,14 +419,14 @@ fn style_text(value: &str, style: AnsiStyle) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TableRow, render_table, strip_ansi_codes, visible_width};
+    use super::{TableRow, parse_timestamp_display, render_table, strip_ansi, visible_width};
     use crate::adapters::codex::CodexAdapter;
     use crate::core::state::{AccountRecord, AccountType, State, UsageSnapshot};
 
     #[test]
     fn strip_ansi_codes_keeps_visible_width_correct() {
         let styled = "\u{1b}[32m80%\u{1b}[0m";
-        assert_eq!(strip_ansi_codes(styled), "80%");
+        assert_eq!(strip_ansi(styled), "80%");
         assert_eq!(visible_width(styled), 3);
     }
 
@@ -524,7 +501,12 @@ mod tests {
 
         let rendered = adapter.render_account_table(&state, None);
 
-        assert!(rendered.contains("Type"));
+        // "Type" 列头在英文模式为 "Type"，中文模式为 "类型"；用实际 messages() 获取正确值
+        let type_header = crate::core::ui::messages().table_headers()[2];
+        assert!(
+            rendered.contains(type_header),
+            "table header should contain Type/类型 column"
+        );
         assert!(rendered.contains("API"));
         assert!(rendered.contains("56wxyz@openrouter"));
         let api_line = rendered
@@ -649,5 +631,29 @@ mod tests {
         // clean bottom border (no column dividers)
         assert_eq!(lines.last().and_then(|line| line.chars().next()), Some('└'));
         assert!(!lines.last().unwrap().contains('┴'));
+    }
+
+    #[test]
+    fn parse_timestamp_display_handles_epoch() {
+        // 1745161920 = 2025-04-20T15:32:00Z
+        let result = parse_timestamp_display("1745161920");
+        assert!(result.is_some(), "should parse i64 epoch");
+        let s = result.unwrap();
+        // 格式应为 MM-DD HH:MM
+        assert_eq!(s.len(), 11);
+    }
+
+    #[test]
+    fn parse_timestamp_display_handles_rfc3339() {
+        let result = parse_timestamp_display("2026-04-20T15:32:00Z");
+        assert!(result.is_some(), "should parse RFC3339");
+        let s = result.unwrap();
+        assert_eq!(s.len(), 11);
+    }
+
+    #[test]
+    fn parse_timestamp_display_returns_none_for_invalid() {
+        assert!(parse_timestamp_display("not-a-date").is_none());
+        assert!(parse_timestamp_display("N/A").is_none());
     }
 }

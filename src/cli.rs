@@ -1,6 +1,5 @@
 use std::env;
 use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -626,730 +625,699 @@ fn command_help_topic(name: &str) -> Option<HelpTopic> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 帮助文本表驱动实现
+// ---------------------------------------------------------------------------
+
+/// 一条帮助条目（参数/选项/环境变量行）。
+/// `name` 是标志/变量名，不需要翻译；`desc` 是 (en, zh) 说明。
+#[derive(Copy, Clone)]
+struct HelpItem {
+    name: &'static str,
+    desc: (&'static str, &'static str),
+}
+
+/// 每个 HelpTopic 对应一个 HelpEntry，持有 (en, zh) 文本对。
+struct HelpEntry {
+    /// 每条 usage 行，如有多条（别名）则多个元素。
+    usage_lines: &'static [(&'static str, &'static str)],
+    /// 可选的描述段落，在 usage 和 options 之间输出。
+    description: Option<(&'static str, &'static str)>,
+    /// Arguments 段条目。
+    args: &'static [HelpItem],
+    /// Options 段条目（每个 topic 的 -h/--help 已内置，不需要在表里重复）。
+    options: &'static [HelpItem],
+    /// Environment 段条目。
+    env: &'static [HelpItem],
+    /// Commands 段条目（仅 Root 使用）。
+    commands: &'static [HelpItem],
+}
+
+// Root 命令列表
+static ROOT_COMMANDS: &[HelpItem] = &[
+    HelpItem {
+        name: "launch",
+        desc: (
+            "Switch to the best account and launch or resume Codex",
+            "切换到最佳账号，并启动或恢复 Codex",
+        ),
+    },
+    HelpItem {
+        name: "auto",
+        desc: (
+            "Switch to the best account without launching Codex",
+            "切换到最佳账号，但不启动 Codex",
+        ),
+    },
+    HelpItem {
+        name: "add",
+        desc: ("Add one account and switch to it", "新增一个账号并切换"),
+    },
+    HelpItem {
+        name: "login",
+        desc: (
+            "Add one account through device auth",
+            "通过设备登录新增一个账号",
+        ),
+    },
+    HelpItem {
+        name: "deploy",
+        desc: (
+            "Copy the current auth.json to a remote machine [alias: sync]",
+            "把当前 auth.json 复制到远端机器 [别名：sync]",
+        ),
+    },
+    HelpItem {
+        name: "push",
+        desc: (
+            "Push the local account pool into a Git repository",
+            "把本地账号池推送到 Git 仓库",
+        ),
+    },
+    HelpItem {
+        name: "pull",
+        desc: (
+            "Pull an account pool from a Git repository",
+            "从 Git 仓库拉取账号池",
+        ),
+    },
+    HelpItem {
+        name: "use",
+        desc: (
+            "Switch directly to a known account by email",
+            "按邮箱直接切换到一个已知账号",
+        ),
+    },
+    HelpItem {
+        name: "rm",
+        desc: (
+            "Remove a stored account by email",
+            "按邮箱删除一个已保存的账号",
+        ),
+    },
+    HelpItem {
+        name: "list",
+        desc: ("Show the latest account quotas", "显示最新账号额度"),
+    },
+    HelpItem {
+        name: "refresh",
+        desc: (
+            "Refresh live usage for all known accounts",
+            "刷新所有已知账号的实时额度",
+        ),
+    },
+    HelpItem {
+        name: "update",
+        desc: (
+            "Self-update scodex [alias: upgrade]",
+            "自更新 scodex [别名：upgrade]",
+        ),
+    },
+    HelpItem {
+        name: "import-auth",
+        desc: (
+            "Import an auth.json file or home directory",
+            "导入 auth.json 文件或其所在 home 目录",
+        ),
+    },
+    HelpItem {
+        name: "import-known",
+        desc: (
+            "Import the default known auth sources",
+            "导入默认已知认证来源",
+        ),
+    },
+    HelpItem {
+        name: "help",
+        desc: (
+            "Print this message or the help of the given subcommand(s)",
+            "显示帮助",
+        ),
+    },
+];
+
+// Root 全局选项
+static ROOT_OPTIONS: &[HelpItem] = &[
+    HelpItem {
+        name: "      --state-dir <STATE_DIR>",
+        desc: ("Override the local state directory", "覆盖本地状态目录"),
+    },
+    HelpItem {
+        name: "  -h, --help                  ",
+        desc: ("Print help", "显示帮助"),
+    },
+];
+
+// add 命令选项
+static ADD_OPTIONS: &[HelpItem] = &[
+    HelpItem {
+        name: "      --switch              ",
+        desc: (
+            "Deprecated compatibility option; add always switches now",
+            "兼容旧用法的保留选项；当前 add 总是会切换",
+        ),
+    },
+    HelpItem {
+        name: "      --api                ",
+        desc: (
+            "Add an API-key account; requires --API_TOKEN, --BASE_URL, and --provider",
+            "新增 API key 账号，需要同时传入 --API_TOKEN、--BASE_URL 和 --provider",
+        ),
+    },
+    HelpItem {
+        name: "      --API_TOKEN <TOKEN>  ",
+        desc: (
+            "API token used when --api is set",
+            "--api 模式下使用的 API token",
+        ),
+    },
+    HelpItem {
+        name: "      --BASE_URL <URL>     ",
+        desc: (
+            "API base URL used when --api is set",
+            "--api 模式下使用的 API base URL",
+        ),
+    },
+    HelpItem {
+        name: "      --provider <NAME>    ",
+        desc: (
+            "Provider id used when --api is set",
+            "--api 模式下使用的 provider id",
+        ),
+    },
+    HelpItem {
+        name: "  -h, --help               ",
+        desc: ("Print help", "显示帮助"),
+    },
+];
+
+// login 命令选项
+static LOGIN_OPTIONS: &[HelpItem] = &[
+    HelpItem {
+        name: "      --api                ",
+        desc: (
+            "Add an API-key account; requires --API_TOKEN, --BASE_URL, and --provider",
+            "新增 API key 账号，需要同时传入 --API_TOKEN、--BASE_URL 和 --provider",
+        ),
+    },
+    HelpItem {
+        name: "      --API_TOKEN <TOKEN>  ",
+        desc: (
+            "API token used when --api is set",
+            "--api 模式下使用的 API token",
+        ),
+    },
+    HelpItem {
+        name: "      --BASE_URL <URL>     ",
+        desc: (
+            "API base URL used when --api is set",
+            "--api 模式下使用的 API base URL",
+        ),
+    },
+    HelpItem {
+        name: "      --provider <NAME>    ",
+        desc: (
+            "Provider id used when --api is set",
+            "--api 模式下使用的 provider id",
+        ),
+    },
+    HelpItem {
+        name: "      --oauth              ",
+        desc: (
+            "Use the browser OAuth flow with auto-fill; requires --username and --password",
+            "使用浏览器 OAuth 流程并自动填充，需要同时传入 --username 和 --password",
+        ),
+    },
+    HelpItem {
+        name: "      --username <EMAIL>   ",
+        desc: ("Email used when --oauth is set", "--oauth 模式下使用的邮箱"),
+    },
+    HelpItem {
+        name: "      --password <PASS>    ",
+        desc: (
+            "Password used when --oauth is set (visible in ps; scope to trusted shells)",
+            "--oauth 模式下使用的密码（会出现在 ps 中，建议仅在可信 shell 使用）",
+        ),
+    },
+    HelpItem {
+        name: "  -h, --help               ",
+        desc: ("Print help", "显示帮助"),
+    },
+];
+
+// push/pull 共享选项
+static REPO_SYNC_OPTIONS: &[HelpItem] = &[
+    HelpItem {
+        name: "      --path <REPO_PATH>",
+        desc: (
+            "Repository subdirectory used for the account pool",
+            "仓库内用于保存账号池的子目录",
+        ),
+    },
+    HelpItem {
+        name: "  -i <IDENTITY_FILE>    ",
+        desc: (
+            "SSH private key passed to git via GIT_SSH_COMMAND",
+            "通过 GIT_SSH_COMMAND 传给 git 的 SSH 私钥",
+        ),
+    },
+    HelpItem {
+        name: "  -h, --help            ",
+        desc: ("Print help", "显示帮助"),
+    },
+];
+
+static PUSH_ENV: &[HelpItem] = &[
+    HelpItem {
+        name: "SCODEX_POOL_KEY ",
+        desc: (
+            "Symmetric key source for encrypting the account pool",
+            "用于加密账号池的对称密钥来源",
+        ),
+    },
+    HelpItem {
+        name: "SCODEX_POOL_PATH",
+        desc: (
+            "Repository subdirectory used for the account pool when --path is omitted",
+            "未传 --path 时，仓库内账号池子目录来源",
+        ),
+    },
+    HelpItem {
+        name: "SCODEX_POOL_REPO",
+        desc: (
+            "Repository URL/path used when [REPO] is omitted",
+            "未传 [REPO] 时，账号池仓库 URL/路径来源",
+        ),
+    },
+];
+
+static PULL_ENV: &[HelpItem] = &[
+    HelpItem {
+        name: "SCODEX_POOL_KEY ",
+        desc: (
+            "Symmetric key source for decrypting the account pool",
+            "用于解密账号池的对称密钥来源",
+        ),
+    },
+    HelpItem {
+        name: "SCODEX_POOL_PATH",
+        desc: (
+            "Repository subdirectory used for the account pool when --path is omitted",
+            "未传 --path 时，仓库内账号池子目录来源",
+        ),
+    },
+    HelpItem {
+        name: "SCODEX_POOL_REPO",
+        desc: (
+            "Repository URL/path used when [REPO] is omitted",
+            "未传 [REPO] 时，账号池仓库 URL/路径来源",
+        ),
+    },
+];
+
+static REPO_SYNC_ARGS: &[HelpItem] = &[HelpItem {
+    name: "  [REPO]",
+    desc: (
+        "Git remote URL or local repository path (CLI > SCODEX_POOL_REPO > local state)",
+        "Git 远端 URL 或本地仓库路径（优先级：命令行 > SCODEX_POOL_REPO > 本地状态）",
+    ),
+}];
+
+/// 根据 topic 获取对应的 HelpEntry。
+fn help_entry(topic: HelpTopic) -> HelpEntry {
+    match topic {
+        HelpTopic::Root => HelpEntry {
+            usage_lines: &[("  scodex [OPTIONS] [COMMAND]", "  scodex [选项] [命令]")],
+            description: None,
+            args: &[],
+            options: ROOT_OPTIONS,
+            env: &[],
+            commands: ROOT_COMMANDS,
+        },
+        HelpTopic::Launch => HelpEntry {
+            usage_lines: &[(
+                "  scodex launch [OPTIONS] [<codex args...>]",
+                "  scodex launch [选项] [<codex 参数...>]",
+            )],
+            description: None,
+            args: &[],
+            options: &[
+                HelpItem {
+                    name: "      --no-import-known",
+                    desc: (
+                        "Skip auto-import of known auth sources",
+                        "跳过自动导入已知认证来源",
+                    ),
+                },
+                HelpItem {
+                    name: "      --no-login        ",
+                    desc: (
+                        "Do not start device auth when no usable account exists",
+                        "当没有可用账号时，不自动发起设备登录",
+                    ),
+                },
+                HelpItem {
+                    name: "      --dry-run         ",
+                    desc: (
+                        "Show the selected account without switching or launching",
+                        "只显示会选中的账号",
+                    ),
+                },
+                HelpItem {
+                    name: "      --no-resume       ",
+                    desc: ("Always start a fresh Codex session", "总是新开 Codex 会话"),
+                },
+                HelpItem {
+                    name: "      --no-launch       ",
+                    desc: (
+                        "Switch the account but do not start Codex",
+                        "只切换账号，不启动 Codex",
+                    ),
+                },
+                HelpItem {
+                    name: "  -h, --help            ",
+                    desc: ("Print help", "显示帮助"),
+                },
+            ],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Auto => HelpEntry {
+            usage_lines: &[("  scodex auto [OPTIONS]", "  scodex auto [选项]")],
+            description: None,
+            args: &[],
+            options: &[
+                HelpItem {
+                    name: "      --no-import-known",
+                    desc: (
+                        "Skip auto-import of known auth sources",
+                        "跳过自动导入已知认证来源",
+                    ),
+                },
+                HelpItem {
+                    name: "      --no-login        ",
+                    desc: (
+                        "Do not start device auth when no usable account exists",
+                        "当没有可用账号时，不自动发起设备登录",
+                    ),
+                },
+                HelpItem {
+                    name: "      --dry-run         ",
+                    desc: (
+                        "Show the selected account without switching",
+                        "只显示会选中的账号，不执行切换",
+                    ),
+                },
+                HelpItem {
+                    name: "  -h, --help            ",
+                    desc: ("Print help", "显示帮助"),
+                },
+            ],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Add => HelpEntry {
+            usage_lines: &[("  scodex add [OPTIONS]", "  scodex add [选项]")],
+            description: Some((
+                "Adds one account and switches to it.",
+                "新增一个账号，并立即切换到该账号。",
+            )),
+            args: &[],
+            options: ADD_OPTIONS,
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Login => HelpEntry {
+            usage_lines: &[("  scodex login [OPTIONS]", "  scodex login [选项]")],
+            description: None,
+            args: &[],
+            options: LOGIN_OPTIONS,
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Deploy => HelpEntry {
+            usage_lines: &[
+                (
+                    "  scodex deploy [OPTIONS] <TARGET>",
+                    "  scodex deploy [选项] <TARGET>",
+                ),
+                (
+                    "  scodex sync [OPTIONS] <TARGET>",
+                    "  scodex sync [选项] <TARGET>",
+                ),
+            ],
+            description: None,
+            args: &[HelpItem {
+                name: "  <TARGET>",
+                desc: (
+                    "Remote destination in the form user@host:/target_path",
+                    "远端目标，格式为 user@host:/target_path",
+                ),
+            }],
+            options: &[
+                HelpItem {
+                    name: "  -i <IDENTITY_FILE>",
+                    desc: (
+                        "Pass an SSH identity file to ssh/scp",
+                        "传给 ssh/scp 的 SSH 身份文件",
+                    ),
+                },
+                HelpItem {
+                    name: "  -h, --help        ",
+                    desc: ("Print help", "显示帮助"),
+                },
+            ],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Push => HelpEntry {
+            usage_lines: &[(
+                "  scodex push [OPTIONS] [REPO]",
+                "  scodex push [选项] [REPO]",
+            )],
+            description: None,
+            args: REPO_SYNC_ARGS,
+            options: REPO_SYNC_OPTIONS,
+            env: PUSH_ENV,
+            commands: &[],
+        },
+        HelpTopic::Pull => HelpEntry {
+            usage_lines: &[(
+                "  scodex pull [OPTIONS] [REPO]",
+                "  scodex pull [选项] [REPO]",
+            )],
+            description: None,
+            args: REPO_SYNC_ARGS,
+            options: REPO_SYNC_OPTIONS,
+            env: PULL_ENV,
+            commands: &[],
+        },
+        HelpTopic::Use => HelpEntry {
+            usage_lines: &[("  scodex use <EMAIL>", "  scodex use <EMAIL>")],
+            description: None,
+            args: &[HelpItem {
+                name: "  <EMAIL>",
+                desc: ("Account email to switch to", "要切换到的账号邮箱"),
+            }],
+            options: &[HelpItem {
+                name: "  -h, --help",
+                desc: ("Print help", "显示帮助"),
+            }],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Rm => HelpEntry {
+            usage_lines: &[(
+                "  scodex rm [OPTIONS] <EMAIL>",
+                "  scodex rm [选项] <EMAIL>",
+            )],
+            description: None,
+            args: &[HelpItem {
+                name: "  <EMAIL>",
+                desc: ("Account email to remove", "要删除的账号邮箱"),
+            }],
+            options: &[
+                HelpItem {
+                    name: "  -y, --yes  ",
+                    desc: (
+                        "Skip the interactive confirmation prompt",
+                        "跳过交互式二次确认",
+                    ),
+                },
+                HelpItem {
+                    name: "  -h, --help ",
+                    desc: ("Print help", "显示帮助"),
+                },
+            ],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::List => HelpEntry {
+            usage_lines: &[("  scodex list", "  scodex list")],
+            description: None,
+            args: &[],
+            options: &[HelpItem {
+                name: "  -h, --help",
+                desc: ("Print help", "显示帮助"),
+            }],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Refresh => HelpEntry {
+            usage_lines: &[("  scodex refresh", "  scodex refresh")],
+            description: None,
+            args: &[],
+            options: &[HelpItem {
+                name: "  -h, --help",
+                desc: ("Print help", "显示帮助"),
+            }],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::Update => HelpEntry {
+            usage_lines: &[
+                ("  scodex update [OPTIONS]", "  scodex update [选项]"),
+                ("  scodex upgrade [OPTIONS]", "  scodex upgrade [选项]"),
+            ],
+            description: None,
+            args: &[],
+            options: &[
+                HelpItem {
+                    name: "  -f, --force",
+                    desc: (
+                        "Reinstall even when the current version is already latest",
+                        "即使当前版本已经最新，也强制重新安装",
+                    ),
+                },
+                HelpItem {
+                    name: "  -h, --help ",
+                    desc: ("Print help", "显示帮助"),
+                },
+            ],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::ImportAuth => HelpEntry {
+            usage_lines: &[("  scodex import-auth <PATH>", "  scodex import-auth <PATH>")],
+            description: None,
+            args: &[HelpItem {
+                name: "  <PATH>",
+                desc: (
+                    "Path to an auth.json file or a home directory containing it",
+                    "auth.json 文件路径，或包含该文件的 home 目录",
+                ),
+            }],
+            options: &[HelpItem {
+                name: "  -h, --help",
+                desc: ("Print help", "显示帮助"),
+            }],
+            env: &[],
+            commands: &[],
+        },
+        HelpTopic::ImportKnown => HelpEntry {
+            usage_lines: &[("  scodex import-known", "  scodex import-known")],
+            description: None,
+            args: &[],
+            options: &[HelpItem {
+                name: "  -h, --help",
+                desc: ("Print help", "显示帮助"),
+            }],
+            env: &[],
+            commands: &[],
+        },
+    }
+}
+
+/// 统一渲染入口：is_zh 在此分支一次，下游渲染器用 pick() 取文本。
 fn render_help(topic: HelpTopic) -> String {
-    let ui = ui::messages();
-    if ui.is_zh() {
-        render_help_zh(topic)
-    } else {
-        render_help_en(topic)
-    }
+    render_help_with_lang(topic, ui::messages().is_zh())
 }
 
-fn render_help_en(topic: HelpTopic) -> String {
-    let mut out = String::new();
-    match topic {
-        HelpTopic::Root => {
-            writeln!(&mut out, "{}", ui::messages().cli_about()).unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex [OPTIONS] [COMMAND]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Commands:").unwrap();
-            writeln!(
-                &mut out,
-                "  launch       Switch to the best account and launch or resume Codex"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  auto         Switch to the best account without launching Codex"
-            )
-            .unwrap();
-            writeln!(&mut out, "  add          Add one account and switch to it").unwrap();
-            writeln!(
-                &mut out,
-                "  login        Add one account through device auth"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  deploy       Copy the current auth.json to a remote machine [alias: sync]"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  push         Push the local account pool into a Git repository"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  pull         Pull an account pool from a Git repository"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  use          Switch directly to a known account by email"
-            )
-            .unwrap();
-            writeln!(&mut out, "  rm           Remove a stored account by email").unwrap();
-            writeln!(&mut out, "  list         Show the latest account quotas").unwrap();
-            writeln!(
-                &mut out,
-                "  refresh      Refresh live usage for all known accounts"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  update       Self-update scodex [alias: upgrade]"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  import-auth  Import an auth.json file or home directory"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  import-known Import the default known auth sources"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  help         Print this message or the help of the given subcommand(s)"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --state-dir <STATE_DIR>  Override the local state directory"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help                   Print help").unwrap();
-        }
-        HelpTopic::Launch => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex launch [OPTIONS] [<codex args...>]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --no-import-known  Skip auto-import of known auth sources"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --no-login         Do not start device auth when no usable account exists"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --dry-run          Show the selected account without switching or launching"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --no-resume        Always start a fresh Codex session"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --no-launch        Switch the account but do not start Codex"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help             Print help").unwrap();
-        }
-        HelpTopic::Auto => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex auto [OPTIONS]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --no-import-known  Skip auto-import of known auth sources"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --no-login         Do not start device auth when no usable account exists"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --dry-run          Show the selected account without switching"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help             Print help").unwrap();
-        }
-        HelpTopic::Add => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex add [OPTIONS]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Adds one account and switches to it.").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --switch  Deprecated compatibility option; add always switches now"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --api                Add an API-key account; requires --API_TOKEN, --BASE_URL, and --provider"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --API_TOKEN <TOKEN>  API token used when --api is set"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --BASE_URL <URL>     API base URL used when --api is set"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --provider <NAME>    Provider id used when --api is set"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help    Print help").unwrap();
-        }
-        HelpTopic::Login => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex login [OPTIONS]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --api                Add an API-key account; requires --API_TOKEN, --BASE_URL, and --provider"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --API_TOKEN <TOKEN>  API token used when --api is set"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --BASE_URL <URL>     API base URL used when --api is set"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --provider <NAME>    Provider id used when --api is set"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --oauth              Use the browser OAuth flow with auto-fill; requires --username and --password"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --username <EMAIL>   Email used when --oauth is set"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --password <PASS>    Password used when --oauth is set (visible in ps; scope to trusted shells)"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help               Print help").unwrap();
-        }
-        HelpTopic::Deploy => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex deploy [OPTIONS] <TARGET>").unwrap();
-            writeln!(&mut out, "  scodex sync [OPTIONS] <TARGET>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Arguments:").unwrap();
-            writeln!(
-                &mut out,
-                "  <TARGET>  Remote destination in the form user@host:/target_path"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "  -i <IDENTITY_FILE>  Pass an SSH identity file to ssh/scp"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help          Print help").unwrap();
-        }
-        HelpTopic::Push => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex push [OPTIONS] [REPO]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Arguments:").unwrap();
-            writeln!(
-                &mut out,
-                "  [REPO]  Git remote URL or local repository path (CLI > SCODEX_POOL_REPO > local state)"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --path <REPO_PATH>  Repository subdirectory used for the account pool"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  -i <IDENTITY_FILE>      SSH private key passed to git via GIT_SSH_COMMAND"
-            )
-            .unwrap();
-            writeln!(&mut out, "Environment:").unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_KEY  Symmetric key source for encrypting the account pool"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_PATH Repository subdirectory used for the account pool when --path is omitted"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_REPO Repository URL/path used when [REPO] is omitted"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help            Print help").unwrap();
-        }
-        HelpTopic::Pull => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex pull [OPTIONS] [REPO]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Arguments:").unwrap();
-            writeln!(
-                &mut out,
-                "  [REPO]  Git remote URL or local repository path (CLI > SCODEX_POOL_REPO > local state)"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "      --path <REPO_PATH>  Repository subdirectory used for the account pool"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  -i <IDENTITY_FILE>      SSH private key passed to git via GIT_SSH_COMMAND"
-            )
-            .unwrap();
-            writeln!(&mut out, "Environment:").unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_KEY  Symmetric key source for decrypting the account pool"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_PATH Repository subdirectory used for the account pool when --path is omitted"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_REPO Repository URL/path used when [REPO] is omitted"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help            Print help").unwrap();
-        }
-        HelpTopic::Use => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex use <EMAIL>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Arguments:").unwrap();
-            writeln!(&mut out, "  <EMAIL>  Account email to switch to").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(&mut out, "  -h, --help  Print help").unwrap();
-        }
-        HelpTopic::Rm => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex rm [OPTIONS] <EMAIL>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Arguments:").unwrap();
-            writeln!(&mut out, "  <EMAIL>  Account email to remove").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "  -y, --yes   Skip the interactive confirmation prompt"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help  Print help").unwrap();
-        }
-        HelpTopic::List => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex list").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(&mut out, "  -h, --help  Print help").unwrap();
-        }
-        HelpTopic::Refresh => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex refresh").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(&mut out, "  -h, --help  Print help").unwrap();
-        }
-        HelpTopic::Update => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex update [OPTIONS]").unwrap();
-            writeln!(&mut out, "  scodex upgrade [OPTIONS]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(
-                &mut out,
-                "  -f, --force  Reinstall even when the current version is already latest"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help   Print help").unwrap();
-        }
-        HelpTopic::ImportAuth => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex import-auth <PATH>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Arguments:").unwrap();
-            writeln!(
-                &mut out,
-                "  <PATH>  Path to an auth.json file or a home directory containing it"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(&mut out, "  -h, --help  Print help").unwrap();
-        }
-        HelpTopic::ImportKnown => {
-            writeln!(&mut out, "Usage:").unwrap();
-            writeln!(&mut out, "  scodex import-known").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "Options:").unwrap();
-            writeln!(&mut out, "  -h, --help  Print help").unwrap();
-        }
-    }
-    out
-}
+/// 实际渲染逻辑，接受显式语言参数（方便测试）。
+fn render_help_with_lang(topic: HelpTopic, is_zh: bool) -> String {
+    let entry = help_entry(topic);
 
-fn render_help_zh(topic: HelpTopic) -> String {
+    // pick 从 (en, zh) 对中按语言选文本
+    let pick = |pair: (&'static str, &'static str)| if is_zh { pair.1 } else { pair.0 };
+
     let mut out = String::new();
-    match topic {
-        HelpTopic::Root => {
-            writeln!(&mut out, "{}", ui::messages().cli_about()).unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex [选项] [命令]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "命令：").unwrap();
-            writeln!(
-                &mut out,
-                "  launch       切换到最佳账号，并启动或恢复 Codex"
-            )
-            .unwrap();
-            writeln!(&mut out, "  auto         切换到最佳账号，但不启动 Codex").unwrap();
-            writeln!(&mut out, "  add          新增一个账号并切换").unwrap();
-            writeln!(&mut out, "  login        通过设备登录新增一个账号").unwrap();
-            writeln!(
-                &mut out,
-                "  deploy       把当前 auth.json 复制到远端机器 [别名：sync]"
-            )
-            .unwrap();
-            writeln!(&mut out, "  push         把本地账号池推送到 Git 仓库").unwrap();
-            writeln!(&mut out, "  pull         从 Git 仓库拉取账号池").unwrap();
-            writeln!(&mut out, "  use          按邮箱直接切换到一个已知账号").unwrap();
-            writeln!(&mut out, "  rm           按邮箱删除一个已保存的账号").unwrap();
-            writeln!(&mut out, "  list         显示最新账号额度").unwrap();
-            writeln!(&mut out, "  refresh      刷新所有已知账号的实时额度").unwrap();
-            writeln!(&mut out, "  update       自更新 scodex [别名：upgrade]").unwrap();
-            writeln!(
-                &mut out,
-                "  import-auth  导入 auth.json 文件或其所在 home 目录"
-            )
-            .unwrap();
-            writeln!(&mut out, "  import-known 导入默认已知认证来源").unwrap();
-            writeln!(&mut out, "  help         显示帮助").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "      --state-dir <STATE_DIR>  覆盖本地状态目录").unwrap();
-            writeln!(&mut out, "  -h, --help                   显示帮助").unwrap();
-        }
-        HelpTopic::Launch => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex launch [选项] [<codex 参数...>]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "      --no-import-known  跳过自动导入已知认证来源"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --no-login         当没有可用账号时，不自动发起设备登录"
-            )
-            .unwrap();
-            writeln!(&mut out, "      --dry-run          只显示会选中的账号").unwrap();
-            writeln!(&mut out, "      --no-resume        总是新开 Codex 会话").unwrap();
-            writeln!(
-                &mut out,
-                "      --no-launch        只切换账号，不启动 Codex"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help             显示帮助").unwrap();
-        }
-        HelpTopic::Auto => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex auto [选项]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "      --no-import-known  跳过自动导入已知认证来源"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --no-login         当没有可用账号时，不自动发起设备登录"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --dry-run          只显示会选中的账号，不执行切换"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help             显示帮助").unwrap();
-        }
-        HelpTopic::Add => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex add [选项]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "新增一个账号，并立即切换到该账号。").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "      --switch  兼容旧用法的保留选项；当前 add 总是会切换"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --api                新增 API key 账号，需要同时传入 --API_TOKEN、--BASE_URL 和 --provider"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --API_TOKEN <TOKEN>  --api 模式下使用的 API token"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --BASE_URL <URL>     --api 模式下使用的 API base URL"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --provider <NAME>    --api 模式下使用的 provider id"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help    显示帮助").unwrap();
-        }
-        HelpTopic::Login => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex login [选项]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "      --api                新增 API key 账号，需要同时传入 --API_TOKEN、--BASE_URL 和 --provider"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --API_TOKEN <TOKEN>  --api 模式下使用的 API token"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --BASE_URL <URL>     --api 模式下使用的 API base URL"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --provider <NAME>    --api 模式下使用的 provider id"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --oauth              使用浏览器 OAuth 流程并自动填充，需要同时传入 --username 和 --password"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --username <EMAIL>   --oauth 模式下使用的邮箱"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "      --password <PASS>    --oauth 模式下使用的密码（会出现在 ps 中，建议仅在可信 shell 使用）"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help               显示帮助").unwrap();
-        }
-        HelpTopic::Deploy => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex deploy [选项] <TARGET>").unwrap();
-            writeln!(&mut out, "  scodex sync [选项] <TARGET>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "参数：").unwrap();
-            writeln!(
-                &mut out,
-                "  <TARGET>  远端目标，格式为 user@host:/target_path"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "  -i <IDENTITY_FILE>  传给 ssh/scp 的 SSH 身份文件"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help          显示帮助").unwrap();
-        }
-        HelpTopic::Push => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex push [选项] [REPO]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "参数：").unwrap();
-            writeln!(
-                &mut out,
-                "  [REPO]  Git 远端 URL 或本地仓库路径（优先级：命令行 > SCODEX_POOL_REPO > 本地状态）"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "      --path <REPO_PATH>  仓库内用于保存账号池的子目录"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  -i <IDENTITY_FILE>      通过 GIT_SSH_COMMAND 传给 git 的 SSH 私钥"
-            )
-            .unwrap();
-            writeln!(&mut out, "环境变量：").unwrap();
-            writeln!(&mut out, "  SCODEX_POOL_KEY  用于加密账号池的对称密钥来源").unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_PATH 未传 --path 时，仓库内账号池子目录来源"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_REPO 未传 [REPO] 时，账号池仓库 URL/路径来源"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help            显示帮助").unwrap();
-        }
-        HelpTopic::Pull => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex pull [选项] [REPO]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "参数：").unwrap();
-            writeln!(
-                &mut out,
-                "  [REPO]  Git 远端 URL 或本地仓库路径（优先级：命令行 > SCODEX_POOL_REPO > 本地状态）"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "      --path <REPO_PATH>  仓库内用于保存账号池的子目录"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  -i <IDENTITY_FILE>      通过 GIT_SSH_COMMAND 传给 git 的 SSH 私钥"
-            )
-            .unwrap();
-            writeln!(&mut out, "环境变量：").unwrap();
-            writeln!(&mut out, "  SCODEX_POOL_KEY  用于解密账号池的对称密钥来源").unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_PATH 未传 --path 时，仓库内账号池子目录来源"
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  SCODEX_POOL_REPO 未传 [REPO] 时，账号池仓库 URL/路径来源"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help            显示帮助").unwrap();
-        }
-        HelpTopic::Use => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex use <EMAIL>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "参数：").unwrap();
-            writeln!(&mut out, "  <EMAIL>  要切换到的账号邮箱").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "  -h, --help  显示帮助").unwrap();
-        }
-        HelpTopic::Rm => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex rm [选项] <EMAIL>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "参数：").unwrap();
-            writeln!(&mut out, "  <EMAIL>  要删除的账号邮箱").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "  -y, --yes   跳过交互式二次确认").unwrap();
-            writeln!(&mut out, "  -h, --help  显示帮助").unwrap();
-        }
-        HelpTopic::List => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex list").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "  -h, --help  显示帮助").unwrap();
-        }
-        HelpTopic::Refresh => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex refresh").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "  -h, --help  显示帮助").unwrap();
-        }
-        HelpTopic::Update => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex update [选项]").unwrap();
-            writeln!(&mut out, "  scodex upgrade [选项]").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(
-                &mut out,
-                "  -f, --force  即使当前版本已经最新，也强制重新安装"
-            )
-            .unwrap();
-            writeln!(&mut out, "  -h, --help   显示帮助").unwrap();
-        }
-        HelpTopic::ImportAuth => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex import-auth <PATH>").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "参数：").unwrap();
-            writeln!(
-                &mut out,
-                "  <PATH>  auth.json 文件路径，或包含该文件的 home 目录"
-            )
-            .unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "  -h, --help  显示帮助").unwrap();
-        }
-        HelpTopic::ImportKnown => {
-            writeln!(&mut out, "用法：").unwrap();
-            writeln!(&mut out, "  scodex import-known").unwrap();
-            writeln!(&mut out).unwrap();
-            writeln!(&mut out, "选项：").unwrap();
-            writeln!(&mut out, "  -h, --help  显示帮助").unwrap();
+
+    // Root topic 在 usage 前先输出 about 行
+    if topic == HelpTopic::Root {
+        // about 文本本身已按语言给出，复用 ui::messages 的翻译
+        let about = if is_zh {
+            "面向代理 CLI 的跨平台账号感知启动器。"
+        } else {
+            "Cross-platform account-aware launcher for agent CLIs."
+        };
+        out.push_str(about);
+        out.push('\n');
+        out.push('\n');
+    }
+
+    // Usage / 用法
+    let usage_label = if is_zh { "用法：" } else { "Usage:" };
+    out.push_str(usage_label);
+    out.push('\n');
+    for &line in entry.usage_lines {
+        out.push_str(pick(line));
+        out.push('\n');
+    }
+
+    // Description（可选段落）
+    if let Some(desc) = entry.description {
+        out.push('\n');
+        out.push_str(pick(desc));
+        out.push('\n');
+    }
+
+    // Commands（仅 Root）
+    if !entry.commands.is_empty() {
+        out.push('\n');
+        let label = if is_zh { "命令：" } else { "Commands:" };
+        out.push_str(label);
+        out.push('\n');
+        for item in entry.commands {
+            out.push_str(&format!("  {:<12} {}\n", item.name, pick(item.desc)));
         }
     }
+
+    // Arguments
+    if !entry.args.is_empty() {
+        out.push('\n');
+        let label = if is_zh { "参数：" } else { "Arguments:" };
+        out.push_str(label);
+        out.push('\n');
+        for item in entry.args {
+            out.push_str(&format!("{}  {}\n", item.name, pick(item.desc)));
+        }
+    }
+
+    // Options / 选项
+    if !entry.options.is_empty() {
+        out.push('\n');
+        let label = if is_zh { "选项：" } else { "Options:" };
+        out.push_str(label);
+        out.push('\n');
+        for item in entry.options {
+            out.push_str(&format!("{}  {}\n", item.name, pick(item.desc)));
+        }
+    }
+
+    // Environment / 环境变量
+    if !entry.env.is_empty() {
+        let label = if is_zh {
+            "环境变量："
+        } else {
+            "Environment:"
+        };
+        out.push_str(label);
+        out.push('\n');
+        for item in entry.env {
+            out.push_str(&format!("  {}  {}\n", item.name, pick(item.desc)));
+        }
+    }
+
     out
 }
 
@@ -1357,7 +1325,7 @@ fn render_help_zh(topic: HelpTopic) -> String {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, resolve_repo_source};
+    use super::{Cli, Command, HelpTopic, render_help_with_lang, resolve_repo_source};
 
     #[test]
     fn add_supports_api_options() {
@@ -1433,5 +1401,63 @@ mod tests {
     #[test]
     fn repo_source_ignores_blank_values() {
         assert_eq!(resolve_repo_source(Some("  "), Some(""), Some("   ")), None);
+    }
+
+    // help 渲染快照测试：English（直接传入 is_zh=false，不依赖环境变量）
+    #[test]
+    fn help_render_root_en_contains_key_sections() {
+        let out = render_help_with_lang(HelpTopic::Root, false);
+        assert!(out.contains("Usage:"), "should contain 'Usage:' header");
+        assert!(
+            out.contains("Commands:"),
+            "should contain 'Commands:' header"
+        );
+        assert!(out.contains("Options:"), "should contain 'Options:' header");
+        assert!(out.contains("launch"), "should list 'launch' command");
+        assert!(
+            out.contains("--state-dir"),
+            "should list --state-dir option"
+        );
+        assert!(
+            !out.contains("用法"),
+            "EN output must not contain Chinese text"
+        );
+    }
+
+    #[test]
+    fn help_render_push_en_contains_environment_section() {
+        let out = render_help_with_lang(HelpTopic::Push, false);
+        assert!(out.contains("Usage:"));
+        assert!(out.contains("Arguments:"));
+        assert!(out.contains("Options:"));
+        assert!(out.contains("Environment:"));
+        assert!(out.contains("SCODEX_POOL_KEY"));
+        assert!(out.contains("SCODEX_POOL_REPO"));
+    }
+
+    // help 渲染快照测试：Chinese（直接传入 is_zh=true，不依赖环境变量）
+    #[test]
+    fn help_render_root_zh_contains_key_sections() {
+        let out = render_help_with_lang(HelpTopic::Root, true);
+        assert!(out.contains("用法："), "should contain '用法：' header");
+        assert!(out.contains("命令："), "should contain '命令：' header");
+        assert!(out.contains("选项："), "should contain '选项：' header");
+        assert!(out.contains("launch"), "command names are not translated");
+        assert!(out.contains("覆盖本地状态目录"), "zh option desc present");
+        assert!(
+            !out.contains("Usage:"),
+            "zh output must not contain EN header"
+        );
+    }
+
+    #[test]
+    fn help_render_push_zh_contains_env_section() {
+        let out = render_help_with_lang(HelpTopic::Push, true);
+        assert!(out.contains("用法："));
+        assert!(out.contains("参数："));
+        assert!(out.contains("选项："));
+        assert!(out.contains("环境变量："));
+        assert!(out.contains("SCODEX_POOL_KEY"));
+        assert!(out.contains("用于加密账号池"));
     }
 }

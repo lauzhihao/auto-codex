@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use uuid::Uuid;
 
 use super::ApiLoginRequest;
@@ -71,11 +73,11 @@ impl CodexAdapter {
                     .map(ToOwned::to_owned)
             })
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let account_home = state_dir.join("accounts").join(&account_id);
+        let (account_home, stored_auth_path, _stored_config_base) =
+            account_home_paths(state_dir, &account_id);
         fs::create_dir_all(&account_home)
             .with_context(|| format!("failed to create {}", account_home.display()))?;
 
-        let stored_auth_path = account_home.join("auth.json");
         atomic_copy(&input_path, &stored_auth_path)?;
         let stored_config_path = if let Some(config_path) = config_path.filter(|path| path.exists())
         {
@@ -124,18 +126,21 @@ impl CodexAdapter {
         let account_id = existing
             .map(|item| item.id.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let account_home = state_dir.join("accounts").join(&account_id);
+        let (account_home, stored_auth_path, stored_config_path) =
+            account_home_paths(state_dir, &account_id);
         fs::create_dir_all(&account_home)
             .with_context(|| format!("failed to create {}", account_home.display()))?;
 
-        let stored_auth_path = account_home.join("auth.json");
-        let stored_config_path = account_home.join("config.toml");
         atomic_copy(&input_auth, &stored_auth_path)?;
-        fs::write(
-            &stored_config_path,
-            build_api_config(&account_id, request).as_bytes(),
-        )
-        .with_context(|| format!("failed to write {}", stored_config_path.display()))?;
+
+        // 原子写 config.toml：先写 tmp，再 rename，避免写入中途崩溃污染主路径
+        let tmp = stored_config_path.with_extension("toml.tmp");
+        let content = build_api_config(&account_id, request);
+        fs::write(&tmp, content.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        fs::rename(&tmp, &stored_config_path).with_context(|| {
+            format!("failed to move {} into place", stored_config_path.display())
+        })?;
 
         let timestamp = now_ts();
         let record = AccountRecord {
@@ -243,6 +248,40 @@ impl CodexAdapter {
     }
 }
 
+/// 构造账号目录下三条常用路径，减少 import_*_with_id 中的重复 path 拼接
+fn account_home_paths(
+    state_dir: &Path,
+    id: &str,
+) -> (
+    PathBuf, /* home */
+    PathBuf, /* auth.json */
+    PathBuf, /* config.toml */
+) {
+    let home = state_dir.join("accounts").join(id);
+    let auth = home.join("auth.json");
+    let config = home.join("config.toml");
+    (home, auth, config)
+}
+
+/// 取 token 去掉 "sk-" 前缀后末尾 n 个字符；token 不足 n 时返回全部 body
+fn token_tail(token: &str, n: usize) -> String {
+    let trimmed = token.trim();
+    let body = trimmed.strip_prefix("sk-").unwrap_or(trimmed);
+    let tail: String = body
+        .chars()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        body.to_string()
+    } else {
+        tail
+    }
+}
+
 pub(super) fn api_account_email(api_token: &str, provider: &str) -> String {
     format!(
         "{}@{}",
@@ -254,69 +293,81 @@ pub(super) fn api_account_email(api_token: &str, provider: &str) -> String {
 pub(super) fn api_token_label(api_token: &str) -> String {
     let trimmed = api_token.trim();
     let body = trimmed.strip_prefix("sk-").unwrap_or(trimmed);
-    let head = body.chars().take(4).collect::<String>();
-    let tail = body
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
+    let head: String = body.chars().take(4).collect();
+    let tail = token_tail(api_token, 4);
     format!("sk-{head}-{tail}")
 }
 
 fn api_token_suffix(api_token: &str) -> String {
-    let trimmed = api_token.trim();
-    let body = trimmed.strip_prefix("sk-").unwrap_or(trimmed);
-    let suffix = body
-        .chars()
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    if suffix.is_empty() {
-        body.to_string()
-    } else {
-        suffix
-    }
+    token_tail(api_token, 6)
+}
+
+// ---------------------------------------------------------------------------
+// build_api_config：用 toml crate 序列化，替代手拼字符串
+// ---------------------------------------------------------------------------
+
+/// openai 分支的顶层配置（model_provider = "openai"）
+#[derive(Serialize)]
+struct OpenaiApiConfig {
+    model_provider: String,
+    openai_base_url: String,
+    forced_login_method: String,
+}
+
+/// openrouter / 其他 provider 分支的 provider entry
+#[derive(Serialize)]
+struct ProviderEntry {
+    name: String,
+    base_url: String,
+    requires_openai_auth: bool,
+    wire_api: String,
+}
+
+/// openrouter / 其他 provider 分支的顶层配置
+#[derive(Serialize)]
+struct GenericApiConfig {
+    model_provider: String,
+    forced_login_method: String,
+    model_providers: HashMap<String, ProviderEntry>,
 }
 
 pub(super) fn build_api_config(account_id: &str, request: &ApiLoginRequest) -> String {
     let provider = request.provider.trim();
     let base_url = request.base_url.trim();
-    let mut config = String::new();
-    config.push_str(SCODEX_API_CONFIG_MARKER);
-    config.push('\n');
-    config.push_str(SCODEX_ACCOUNT_ID_PREFIX);
-    config.push_str(account_id);
-    config.push('\n');
-    config.push_str("forced_login_method = \"api\"\n");
-    if provider.eq_ignore_ascii_case("openai") {
-        config.push_str("model_provider = \"openai\"\n");
-        config.push_str("openai_base_url = ");
-        config.push_str(&toml_string(base_url));
-        config.push('\n');
+
+    // 注释行必须手写（toml crate 序列化不输出注释）
+    let header = format!(
+        "{}\n{}{}\n",
+        SCODEX_API_CONFIG_MARKER, SCODEX_ACCOUNT_ID_PREFIX, account_id
+    );
+
+    let body = if provider.eq_ignore_ascii_case("openai") {
+        let cfg = OpenaiApiConfig {
+            model_provider: "openai".into(),
+            openai_base_url: base_url.into(),
+            forced_login_method: "api".into(),
+        };
+        toml::to_string_pretty(&cfg).expect("OpenaiApiConfig serialization failed")
     } else {
-        config.push_str("model_provider = ");
-        config.push_str(&toml_string(provider));
-        config.push('\n');
-        config.push('\n');
-        config.push_str("[model_providers.");
-        config.push_str(&toml_string(provider));
-        config.push_str("]\n");
-        config.push_str("name = ");
-        config.push_str(&toml_string(provider));
-        config.push('\n');
-        config.push_str("base_url = ");
-        config.push_str(&toml_string(base_url));
-        config.push('\n');
-        config.push_str("requires_openai_auth = true\n");
-        config.push_str("wire_api = \"responses\"\n");
-    }
-    config
+        let mut providers = HashMap::new();
+        providers.insert(
+            provider.to_ascii_lowercase(),
+            ProviderEntry {
+                name: provider.into(),
+                base_url: base_url.into(),
+                requires_openai_auth: true,
+                wire_api: "responses".into(),
+            },
+        );
+        let cfg = GenericApiConfig {
+            model_provider: provider.into(),
+            forced_login_method: "api".into(),
+            model_providers: providers,
+        };
+        toml::to_string_pretty(&cfg).expect("GenericApiConfig serialization failed")
+    };
+
+    format!("{header}{body}")
 }
 
 pub(super) fn read_managed_config_account_id(codex_home: &Path) -> Option<String> {
@@ -385,22 +436,6 @@ fn is_scodex_managed_config(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|contents| contents.contains(SCODEX_API_CONFIG_MARKER))
         .unwrap_or(false)
-}
-
-fn toml_string(value: &str) -> String {
-    let mut output = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '\\' => output.push_str("\\\\"),
-            '"' => output.push_str("\\\""),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            _ => output.push(ch),
-        }
-    }
-    output.push('"');
-    output
 }
 
 fn atomic_copy(src: &Path, dst: &Path) -> Result<()> {
@@ -585,7 +620,7 @@ mod tests {
     use base64::Engine;
     use uuid::Uuid;
 
-    use super::{api_account_email, build_api_config};
+    use super::{account_home_paths, api_account_email, api_token_label, build_api_config};
     use crate::adapters::codex::ApiLoginRequest;
     use crate::adapters::codex::CodexAdapter;
     use crate::core::state::{AccountRecord, AccountType, State};
@@ -595,6 +630,190 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         format!("{header}.{payload}.sig")
     }
+
+    fn openrouter_request() -> ApiLoginRequest {
+        ApiLoginRequest {
+            api_token: "sk-abcdef123456wxyz".into(),
+            base_url: "https://example.com/v1".into(),
+            provider: "openrouter".into(),
+        }
+    }
+
+    fn openai_request() -> ApiLoginRequest {
+        ApiLoginRequest {
+            api_token: "sk-openai1234abcd".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            provider: "openai".into(),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // token_tail
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn token_tail_with_sk_prefix() {
+        // "sk-abcdef" -> body = "abcdef", tail(4) = "cdef"
+        assert_eq!(super::token_tail("sk-abcdef", 4), "cdef");
+    }
+
+    #[test]
+    fn token_tail_without_prefix() {
+        // body = "abcdef", tail(4) = "cdef"
+        assert_eq!(super::token_tail("abcdef", 4), "cdef");
+    }
+
+    #[test]
+    fn token_tail_shorter_than_n_returns_full_body() {
+        // body = "ab" (2 chars), n = 6 -> tail would be "ab" (not empty)
+        assert_eq!(super::token_tail("sk-ab", 6), "ab");
+    }
+
+    #[test]
+    fn token_tail_empty_body_returns_empty() {
+        // body = "" (empty after stripping prefix), tail is empty -> returns ""
+        assert_eq!(super::token_tail("sk-", 4), "");
+    }
+
+    // ------------------------------------------------------------------
+    // api_token_label
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn api_token_label_formats_head_and_tail() {
+        // body = "abcdef123456wxyz", head(4) = "abcd", tail(4) = "wxyz"
+        assert_eq!(api_token_label("sk-abcdef123456wxyz"), "sk-abcd-wxyz");
+    }
+
+    // ------------------------------------------------------------------
+    // build_api_config — openai branch
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn build_api_config_openai_contains_expected_keys() {
+        let req = openai_request();
+        let config = build_api_config("acct-openai", &req);
+
+        assert!(
+            config.contains("# scodex-managed-api-config"),
+            "missing marker"
+        );
+        assert!(
+            config.contains("# scodex-account-id: acct-openai"),
+            "missing account id"
+        );
+        assert!(
+            config.contains("model_provider = \"openai\""),
+            "missing model_provider"
+        );
+        assert!(
+            config.contains("openai_base_url = \"https://api.openai.com/v1\""),
+            "missing openai_base_url"
+        );
+        assert!(
+            config.contains("forced_login_method = \"api\""),
+            "missing forced_login_method"
+        );
+        // openai branch must NOT contain a [model_providers] section
+        assert!(
+            !config.contains("[model_providers"),
+            "openai branch must not have model_providers table"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // build_api_config — openrouter branch
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn build_api_config_openrouter_contains_expected_keys() {
+        let req = openrouter_request();
+        let config = build_api_config("acct-api", &req);
+
+        assert!(config.contains("# scodex-managed-api-config"));
+        assert!(config.contains("# scodex-account-id: acct-api"));
+        assert!(config.contains("model_provider = \"openrouter\""));
+        // toml crate serializes bare-key table header (no quotes around openrouter)
+        assert!(
+            config.contains("[model_providers.openrouter]"),
+            "missing model_providers section; got:\n{config}"
+        );
+        assert!(config.contains("base_url = \"https://example.com/v1\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("wire_api = \"responses\""));
+    }
+
+    // ------------------------------------------------------------------
+    // build_api_config — provider case-insensitive (openai uppercase)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn build_api_config_openai_case_insensitive() {
+        let req = ApiLoginRequest {
+            api_token: "sk-test".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            provider: "OpenAI".into(),
+        };
+        let config = build_api_config("acct-x", &req);
+        assert!(config.contains("model_provider = \"openai\""));
+        assert!(!config.contains("[model_providers"));
+    }
+
+    // ------------------------------------------------------------------
+    // atomic write: tmp file must not remain after success
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_write_no_tmp_pollution_on_success() -> Result<()> {
+        let tmp_dir = std::env::temp_dir().join(format!("scodex-atomic-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir)?;
+
+        let state_dir = tmp_dir.join("state");
+        let mut state = State::default();
+
+        // 写一个最小 auth.json
+        let raw_home = tmp_dir.join("raw");
+        fs::create_dir_all(&raw_home)?;
+        fs::write(
+            raw_home.join("auth.json"),
+            serde_json::json!({ "OPENAI_API_KEY": "sk-abcdef123456wxyz" }).to_string(),
+        )?;
+
+        let req = openrouter_request();
+        let record = CodexAdapter.import_api_auth_path(&state_dir, &mut state, &raw_home, &req)?;
+
+        let config_path = Path::new(record.config_path.as_deref().unwrap());
+        // 主路径必须存在
+        assert!(config_path.exists(), "config.toml should exist");
+        // tmp 文件不应残留
+        let tmp_path = config_path.with_extension("toml.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "tmp file must not remain after atomic write"
+        );
+
+        fs::remove_dir_all(&tmp_dir)?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // account_home_paths helper
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn account_home_paths_returns_correct_structure() {
+        let state_dir = Path::new("/tmp/scodex-state");
+        let id = "test-account-id";
+        let (home, auth, config) = account_home_paths(state_dir, id);
+        assert_eq!(home, state_dir.join("accounts").join(id));
+        assert_eq!(auth, home.join("auth.json"));
+        assert_eq!(config, home.join("config.toml"));
+    }
+
+    // ------------------------------------------------------------------
+    // pre-existing tests (unchanged)
+    // ------------------------------------------------------------------
 
     #[test]
     fn api_account_email_uses_short_secret_locator() {
@@ -622,7 +841,11 @@ mod tests {
         assert!(config.contains("# scodex-managed-api-config"));
         assert!(config.contains("# scodex-account-id: acct-api"));
         assert!(config.contains("model_provider = \"openrouter\""));
-        assert!(config.contains("[model_providers.\"openrouter\"]"));
+        // toml crate uses bare key (no quotes) for simple alphanumeric keys
+        assert!(
+            config.contains("[model_providers.openrouter]"),
+            "expected bare-key section header; got:\n{config}"
+        );
         assert!(config.contains("base_url = \"https://example.com/v1\""));
     }
 

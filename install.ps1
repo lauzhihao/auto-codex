@@ -69,6 +69,7 @@ function Install-ShimScripts {
 
   $shimContent = @"
 @echo off
+rem # scodex shim v1
 setlocal enabledelayedexpansion
 set "SCODEX_HOME=%SCODEX_HOME%"
 if not defined SCODEX_HOME (

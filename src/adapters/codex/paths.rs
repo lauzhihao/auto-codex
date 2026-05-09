@@ -120,26 +120,32 @@ fn npm_global_codex_bin() -> Option<PathBuf> {
         .find(|path| path.exists() && runtime_program_allowed(path))
 }
 
-pub(super) fn find_in_path(binary: &str) -> Option<PathBuf> {
+/// 在 PATH 中搜索 binary，只返回通过 filter 的第一个候选路径。
+/// filter 为 None 时不做额外过滤（相当于原 find_in_path 行为）。
+fn find_in_path_filtered<F>(binary: &str, filter: Option<F>) -> Option<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+{
     let path_var = env::var_os("PATH")?;
     for dir in env::split_paths(&path_var) {
         let candidate = dir.join(binary);
         if candidate.exists() {
-            return Some(candidate);
+            if filter.as_ref().is_none_or(|f| f(&candidate)) {
+                return Some(candidate);
+            }
         }
     }
     None
 }
 
+/// 在 PATH 中搜索 binary，不过滤（原 find_in_path 语义）。
+fn find_in_path(binary: &str) -> Option<PathBuf> {
+    find_in_path_filtered::<fn(&Path) -> bool>(binary, None)
+}
+
+/// 在 PATH 中搜索 binary，跳过不可在当前运行时直接执行的路径（如 WSL 下的 Windows 工具）。
 pub(super) fn find_runtime_program(binary: &str) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
-        let candidate = dir.join(binary);
-        if candidate.exists() && runtime_program_allowed(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    find_in_path_filtered(binary, Some(runtime_program_allowed))
 }
 
 fn runtime_program_allowed(path: &Path) -> bool {
@@ -202,6 +208,8 @@ fn is_windows_interop_path(path: &Path) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'/'
 }
 
+/// 在 PATH 中按优先级顺序搜索多个候选名称，不过滤运行时路径。
+/// 被 deploy.rs 和 repo_sync.rs 用于定位 ssh/scp/git 等系统工具。
 pub(super) fn find_program(candidates: &[&str]) -> Option<PathBuf> {
     candidates
         .iter()
@@ -212,7 +220,10 @@ pub(super) fn find_program(candidates: &[&str]) -> Option<PathBuf> {
 mod tests {
     use std::path::Path;
 
-    use super::{codex_install_command, is_windows_interop_path, wsl_detected_from_signals};
+    use super::{
+        codex_install_command, find_in_path_filtered, is_windows_interop_path,
+        wsl_detected_from_signals,
+    };
 
     #[test]
     fn install_command_uses_official_npm_package() {
@@ -242,6 +253,75 @@ mod tests {
             "6.8.0-generic",
             "Linux version 6.8.0"
         ));
+    }
+
+    // --- find_in_path_filtered 单元测试 ---
+
+    /// 在 base 下创建子目录 subdir，并在其中写入 name 文件（Unix 下设置可执行位）。
+    fn setup_bin(base: &std::path::Path, subdir: &str, name: &str) -> std::path::PathBuf {
+        let dir = base.join(subdir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join(name);
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn find_in_path_filtered_returns_none_when_not_found() {
+        // PATH 指向一个空临时目录，搜索结果应为 None。
+        let base = std::env::temp_dir().join("scodex_test_none");
+        std::fs::create_dir_all(&base).unwrap();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        // SAFETY: 单线程测试，set_var 不会引起数据竞争。
+        unsafe { std::env::set_var("PATH", &base) };
+        let result = find_in_path_filtered::<fn(&Path) -> bool>("no_such_binary_xyz_scodex", None);
+        unsafe { std::env::set_var("PATH", &old_path) };
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_in_path_filtered_hits_first_dir_without_filter() {
+        // 两个目录都有同名文件，无 filter 时应命中第一个。
+        let base = std::env::temp_dir().join("scodex_test_first");
+        let dir1 = setup_bin(&base, "d1", "mybin_scodex");
+        let dir2 = setup_bin(&base, "d2", "mybin_scodex");
+
+        let path_val = std::env::join_paths([dir1.as_path(), dir2.as_path()]).unwrap();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        // SAFETY: 单线程测试，set_var 不会引起数据竞争。
+        unsafe { std::env::set_var("PATH", &path_val) };
+        let result = find_in_path_filtered::<fn(&Path) -> bool>("mybin_scodex", None).unwrap();
+        unsafe { std::env::set_var("PATH", &old_path) };
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(result, dir1.join("mybin_scodex"));
+    }
+
+    #[test]
+    fn find_in_path_filtered_skips_rejected_dir_and_hits_second() {
+        // filter 拒绝第一个目录中的文件，应命中第二个目录。
+        let base = std::env::temp_dir().join("scodex_test_skip");
+        let dir1 = setup_bin(&base, "d1", "mybin_scodex");
+        let dir2 = setup_bin(&base, "d2", "mybin_scodex");
+
+        let first_dir = dir1.clone();
+        let path_val = std::env::join_paths([dir1.as_path(), dir2.as_path()]).unwrap();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        // SAFETY: 单线程测试，set_var 不会引起数据竞争。
+        unsafe { std::env::set_var("PATH", &path_val) };
+        // filter: 拒绝位于 dir1 中的路径
+        let result =
+            find_in_path_filtered("mybin_scodex", Some(|p: &Path| !p.starts_with(&first_dir)));
+        unsafe { std::env::set_var("PATH", &old_path) };
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(result.unwrap(), dir2.join("mybin_scodex"));
     }
 
     #[test]

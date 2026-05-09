@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::core::state::{
     AccountRecord, CURRENT_ACCOUNT_MIN_FIVE_HOUR_PERCENT, LiveIdentity, State, UsageSnapshot,
 };
@@ -56,7 +54,7 @@ pub fn choose_current_api_account<'a>(
         .find(|account| identity_matches(account, live))
 }
 
-pub fn identity_matches(account: &AccountRecord, live: &LiveIdentity) -> bool {
+fn identity_matches(account: &AccountRecord, live: &LiveIdentity) -> bool {
     if live.scodex_account_id.as_deref() == Some(account.id.as_str()) {
         return true;
     }
@@ -71,7 +69,7 @@ pub fn identity_matches(account: &AccountRecord, live: &LiveIdentity) -> bool {
     }
 }
 
-pub fn is_current_account_usable(usage: &UsageSnapshot) -> bool {
+fn is_current_account_usable(usage: &UsageSnapshot) -> bool {
     if usage.needs_relogin || usage.last_sync_error.is_some() {
         return false;
     }

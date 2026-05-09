@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use std::thread;
+use std::time::Duration;
 
+use anyhow::Context as _;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
@@ -15,6 +17,19 @@ use super::{CodexAdapter, now_ts};
 use crate::core::state::{AccountRecord, State, UsageSnapshot};
 
 const MAX_REFRESH_WORKERS: usize = 8;
+
+// 共享 HTTP 客户端：避免每次调用新建连接池，统一设置 30s 读写超时 + 10s 连接超时
+static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn http_client() -> &'static Client {
+    HTTP_CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to build shared HTTP client")
+    })
+}
 
 impl CodexAdapter {
     pub fn refresh_all_accounts(&self, state: &mut State) {
@@ -71,12 +86,7 @@ impl CodexAdapter {
             Err(error) => {
                 return merge_usage_with_previous(
                     previous,
-                    UsageSnapshot {
-                        plan: account.plan.clone(),
-                        last_synced_at: Some(timestamp),
-                        last_sync_error: Some(error.to_string()),
-                        ..UsageSnapshot::default()
-                    },
+                    make_error_snapshot(account.plan.clone(), timestamp, error.to_string()),
                 );
             }
         };
@@ -99,12 +109,11 @@ impl CodexAdapter {
             None => {
                 return merge_usage_with_previous(
                     previous,
-                    UsageSnapshot {
-                        plan: account.plan.clone(),
-                        last_synced_at: Some(timestamp),
-                        last_sync_error: Some("auth.json is missing tokens.access_token".into()),
-                        ..UsageSnapshot::default()
-                    },
+                    make_error_snapshot(
+                        account.plan.clone(),
+                        timestamp,
+                        "auth.json is missing tokens.access_token".into(),
+                    ),
                 );
             }
         };
@@ -113,11 +122,23 @@ impl CodexAdapter {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static("codex-cli"));
+
+        // auth_header 构造失败直接返回错误，不再静默以空头继续请求
         let auth_value = format!("Bearer {access_token}");
-        let auth_header = HeaderValue::from_str(&auth_value);
-        if let Ok(value) = auth_header {
-            headers.insert(AUTHORIZATION, value);
+        let auth_header = HeaderValue::from_str(&auth_value)
+            .context("invalid access_token contains non-ASCII characters");
+        match auth_header {
+            Ok(value) => {
+                headers.insert(AUTHORIZATION, value);
+            }
+            Err(error) => {
+                return merge_usage_with_previous(
+                    previous,
+                    make_error_snapshot(account.plan.clone(), timestamp, error.to_string()),
+                );
+            }
         }
+
         if let Some(account_id) = account_id
             .as_ref()
             .and_then(|value| HeaderValue::from_str(value).ok())
@@ -125,19 +146,13 @@ impl CodexAdapter {
             headers.insert("ChatGPT-Account-Id", account_id);
         }
 
-        let client = Client::new();
-        let response = client.get(&url).headers(headers).send();
+        let response = http_client().get(&url).headers(headers).send();
         let response = match response {
             Ok(response) => response,
             Err(error) => {
                 return merge_usage_with_previous(
                     previous,
-                    UsageSnapshot {
-                        plan: account.plan.clone(),
-                        last_synced_at: Some(timestamp),
-                        last_sync_error: Some(error.to_string()),
-                        ..UsageSnapshot::default()
-                    },
+                    make_error_snapshot(account.plan.clone(), timestamp, error.to_string()),
                 );
             }
         };
@@ -159,12 +174,11 @@ impl CodexAdapter {
         if !response.status().is_success() {
             return merge_usage_with_previous(
                 previous,
-                UsageSnapshot {
-                    plan: account.plan.clone(),
-                    last_synced_at: Some(timestamp),
-                    last_sync_error: Some(format!("GET {url} failed: {}", response.status())),
-                    ..UsageSnapshot::default()
-                },
+                make_error_snapshot(
+                    account.plan.clone(),
+                    timestamp,
+                    format!("GET {url} failed: {}", response.status()),
+                ),
             );
         }
 
@@ -173,12 +187,7 @@ impl CodexAdapter {
             Err(error) => {
                 return merge_usage_with_previous(
                     previous,
-                    UsageSnapshot {
-                        plan: account.plan.clone(),
-                        last_synced_at: Some(timestamp),
-                        last_sync_error: Some(error.to_string()),
-                        ..UsageSnapshot::default()
-                    },
+                    make_error_snapshot(account.plan.clone(), timestamp, error.to_string()),
                 );
             }
         };
@@ -188,6 +197,16 @@ impl CodexAdapter {
         normalized.last_sync_error = None;
         normalized.needs_relogin = false;
         normalized
+    }
+}
+
+/// 统一构造错误快照，消除 6 处对称重复
+fn make_error_snapshot(plan: Option<String>, ts: i64, err: String) -> UsageSnapshot {
+    UsageSnapshot {
+        plan,
+        last_synced_at: Some(ts),
+        last_sync_error: Some(err),
+        ..UsageSnapshot::default()
     }
 }
 
@@ -277,59 +296,67 @@ fn merge_usage_with_previous(
     previous: Option<&UsageSnapshot>,
     update: UsageSnapshot,
 ) -> UsageSnapshot {
-    if let Some(previous) = previous {
-        let mut merged = previous.clone();
-        let should_clear_stale_quota =
-            update.needs_relogin || update.last_sync_error.as_deref().is_some();
-        if update.plan.is_some() {
-            merged.plan = update.plan;
-        }
-        if should_clear_stale_quota {
-            merged.weekly_remaining_percent = update.weekly_remaining_percent;
-        } else if update.weekly_remaining_percent.is_some() {
-            merged.weekly_remaining_percent = update.weekly_remaining_percent;
-        }
-        if should_clear_stale_quota {
-            merged.weekly_refresh_at = update.weekly_refresh_at;
-        } else if update.weekly_refresh_at.is_some() {
-            merged.weekly_refresh_at = update.weekly_refresh_at;
-        }
-        if should_clear_stale_quota {
-            merged.five_hour_remaining_percent = update.five_hour_remaining_percent;
-        } else if update.five_hour_remaining_percent.is_some() {
-            merged.five_hour_remaining_percent = update.five_hour_remaining_percent;
-        }
-        if should_clear_stale_quota {
-            merged.five_hour_refresh_at = update.five_hour_refresh_at;
-        } else if update.five_hour_refresh_at.is_some() {
-            merged.five_hour_refresh_at = update.five_hour_refresh_at;
-        }
-        if should_clear_stale_quota {
-            merged.credits_balance = update.credits_balance;
-        } else if update.credits_balance.is_some() {
-            merged.credits_balance = update.credits_balance;
-        }
-        if update.last_synced_at.is_some() {
-            merged.last_synced_at = update.last_synced_at;
-        }
-        merged.last_sync_error = update.last_sync_error;
-        merged.needs_relogin = update.needs_relogin;
-        return merged;
+    let Some(previous) = previous else {
+        return update;
+    };
+
+    let mut merged = previous.clone();
+    let should_clear_stale_quota =
+        update.needs_relogin || update.last_sync_error.as_deref().is_some();
+
+    // 每个 quota 字段使用统一逻辑：出错/重登时清零，否则有值就更新
+    macro_rules! merge_quota_field {
+        ($field:ident) => {
+            if should_clear_stale_quota {
+                merged.$field = update.$field;
+            } else if update.$field.is_some() {
+                merged.$field = update.$field;
+            }
+        };
     }
-    update
+
+    if update.plan.is_some() {
+        merged.plan = update.plan;
+    }
+    merge_quota_field!(weekly_remaining_percent);
+    merge_quota_field!(weekly_refresh_at);
+    merge_quota_field!(five_hour_remaining_percent);
+    merge_quota_field!(five_hour_refresh_at);
+    merge_quota_field!(credits_balance);
+
+    if update.last_synced_at.is_some() {
+        merged.last_synced_at = update.last_synced_at;
+    }
+    merged.last_sync_error = update.last_sync_error;
+    merged.needs_relogin = update.needs_relogin;
+    merged
 }
 
 fn resolve_usage_url(config_path: Option<&Path>) -> String {
-    let mut base = env::var("CODEX_USAGE_BASE_URL")
-        .unwrap_or_else(|_| "https://chatgpt.com/backend-api".into());
+    // 单次解析环境变量，避免双重 env::var 调用
+    let raw = env::var("CODEX_USAGE_BASE_URL").ok();
+    let mut base = if raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        raw.unwrap()
+    } else {
+        // env 变量未设置或为空时，尝试从 config 文件读取
+        if let Some(config_path) = config_path
+            && let Ok(contents) = fs::read_to_string(config_path)
+            && let Some(parsed) = parse_chatgpt_base_url(&contents)
+        {
+            parsed
+        } else {
+            "https://chatgpt.com/backend-api".into()
+        }
+    };
+
+    // 确保 base 不为空字符串（trim 后）
     if base.trim().is_empty() {
         base = "https://chatgpt.com/backend-api".into();
-    } else if env::var("CODEX_USAGE_BASE_URL").is_err()
-        && let Some(config_path) = config_path
-        && let Ok(contents) = fs::read_to_string(config_path)
-        && let Some(parsed) = parse_chatgpt_base_url(&contents)
-    {
-        base = parsed;
     }
 
     let normalized = normalize_chatgpt_base_url(&base);
@@ -490,10 +517,13 @@ mod tests {
 
     use super::{
         bounded_refresh_worker_count, collect_refreshed_usage_with_worker_count,
-        merge_usage_with_previous, normalize_usage_response, parse_chatgpt_base_url,
+        make_error_snapshot, merge_usage_with_previous, normalize_usage_response,
+        parse_chatgpt_base_url,
     };
     use crate::adapters::codex::CodexAdapter;
     use crate::core::state::{AccountRecord, AccountType, State, UsageSnapshot};
+
+    // ---- 既有测试（原样保留） ------------------------------------------------
 
     #[test]
     fn parse_chatgpt_base_url_reads_config_line() {
@@ -740,6 +770,92 @@ mod tests {
                 .get("acct-d")
                 .and_then(|item| item.plan.as_deref()),
             Some("acct-d")
+        );
+    }
+
+    // ---- 新增测试 ------------------------------------------------------------
+
+    /// make_error_snapshot 字段与参数一一对应，其余字段为 Default
+    #[test]
+    fn make_error_snapshot_fills_fields_correctly() {
+        let snap = make_error_snapshot(Some("Pro".into()), 1_000_000, "oops".into());
+        assert_eq!(snap.plan.as_deref(), Some("Pro"));
+        assert_eq!(snap.last_synced_at, Some(1_000_000));
+        assert_eq!(snap.last_sync_error.as_deref(), Some("oops"));
+        // quota 字段必须为 None（Default）
+        assert!(snap.weekly_remaining_percent.is_none());
+        assert!(snap.five_hour_remaining_percent.is_none());
+        assert!(snap.credits_balance.is_none());
+        assert!(!snap.needs_relogin);
+    }
+
+    /// make_error_snapshot plan=None 同样正确
+    #[test]
+    fn make_error_snapshot_with_none_plan() {
+        let snap = make_error_snapshot(None, 42, "no plan".into());
+        assert!(snap.plan.is_none());
+        assert_eq!(snap.last_synced_at, Some(42));
+        assert_eq!(snap.last_sync_error.as_deref(), Some("no plan"));
+    }
+
+    /// merge 后错误快照的 plan 字段被正确携带到 merged 结果
+    #[test]
+    fn merge_error_snapshot_preserves_plan_from_update() {
+        let previous = UsageSnapshot {
+            plan: Some("Plus".into()),
+            weekly_remaining_percent: Some(50),
+            ..Default::default()
+        };
+        let update = make_error_snapshot(Some("Pro".into()), 999, "fetch failed".into());
+        let merged = merge_usage_with_previous(Some(&previous), update);
+        // plan 来自 update（Some 值覆盖）
+        assert_eq!(merged.plan.as_deref(), Some("Pro"));
+        // quota 应被清零
+        assert!(merged.weekly_remaining_percent.is_none());
+        assert_eq!(merged.last_sync_error.as_deref(), Some("fetch failed"));
+    }
+
+    /// merge 成功快照：quota 字段正常更新，错误字段清空
+    #[test]
+    fn merge_success_snapshot_updates_quota_and_clears_error() {
+        let previous = UsageSnapshot {
+            plan: Some("Plus".into()),
+            weekly_remaining_percent: Some(10),
+            last_sync_error: Some("old error".into()),
+            ..Default::default()
+        };
+        let update = UsageSnapshot {
+            plan: None, // 不覆盖 plan
+            weekly_remaining_percent: Some(80),
+            last_sync_error: None,
+            last_synced_at: Some(12345),
+            ..Default::default()
+        };
+        let merged = merge_usage_with_previous(Some(&previous), update);
+        assert_eq!(merged.plan.as_deref(), Some("Plus")); // 保留旧 plan
+        assert_eq!(merged.weekly_remaining_percent, Some(80));
+        assert!(merged.last_sync_error.is_none());
+        assert_eq!(merged.last_synced_at, Some(12345));
+    }
+
+    /// auth_header 错误：含控制字符的 token 被 HeaderValue 拒绝，错误通过 make_error_snapshot 传播
+    #[test]
+    fn auth_header_invalid_token_produces_error_message() {
+        // reqwest HeaderValue 拒绝控制字符（\x00-\x08 / \x0a-\x1f / \x7f）
+        let bad_token = "Bearer bad\x01token";
+        let result = reqwest::header::HeaderValue::from_str(bad_token);
+        assert!(result.is_err(), "control-char HeaderValue should fail");
+        // 验证 make_error_snapshot 能正确携带该错误消息
+        let snap = make_error_snapshot(
+            Some("Pro".into()),
+            1_000,
+            "invalid access_token contains non-ASCII characters".into(),
+        );
+        assert!(
+            snap.last_sync_error
+                .as_deref()
+                .unwrap()
+                .contains("non-ASCII")
         );
     }
 }

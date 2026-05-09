@@ -1,13 +1,13 @@
 # Architecture
 
-This repository now uses a Rust core with per-CLI adapters.
+This repository currently ships a Rust core with a concrete Codex adapter.
 
 ## Goals
 
 - Keep the current account-selection behavior and local-first workflow.
 - Ship a single cross-platform binary for the wrapper itself.
-- Support multiple AI CLIs without forcing them into one fake auth model.
-- Let each CLI declare the capabilities it actually supports.
+- Keep the adapter boundary explicit enough that another CLI can be added later.
+- Avoid abstract capability traits until a second real adapter needs them.
 
 ## Non-goals
 
@@ -29,9 +29,9 @@ The core owns behavior that should be identical across CLIs:
 
 The core must not know about `~/.codex/auth.json`, `~/.claude/.credentials.json`, or any other CLI-specific paths.
 
-### Adapter
+### Codex Adapter
 
-Each CLI gets its own adapter. Adapters are responsible for translating the core's generic actions into tool-specific behavior.
+The current implementation targets Codex only. `CodexAdapter` translates the core workflow into Codex-specific behavior.
 
 Examples:
 
@@ -42,19 +42,13 @@ Examples:
 - run login
 - launch or resume the underlying CLI
 
-## Capability model
+## Adapter Boundary Decision
 
-Each adapter must explicitly declare which features it supports.
+Short term, scodex is a single-CLI launcher for Codex. The previous `CliAdapter` trait only exposed `id()` and `capabilities()`, while every real call used `CodexAdapter` directly. Keeping that trait made the code look more generic than it was.
 
-- `import_known`
-- `read_current_identity`
-- `switch_account`
-- `login`
-- `launch`
-- `resume`
-- `live_usage`
+The current code therefore uses the concrete `CodexAdapter` directly and does not keep a placeholder capability model. When a second adapter is implemented, introduce a trait around real call sites such as `launch`, `import_known`, `refresh_all`, and `read_live_identity`.
 
-If an adapter does not support `live_usage`, the core must degrade gracefully instead of pretending automatic account scoring works.
+Until then, capability behavior is documented by the concrete Codex implementation and tests.
 
 ## Current rollout
 
@@ -64,7 +58,7 @@ Phase 1 is complete: Codex support now runs on the Rust implementation.
 - preserve local-state compatibility for existing users
 - continue tightening tests around install, update, deploy, and account selection flows
 
-Phase 2 adds new adapters one by one.
+Phase 2 can add new adapters one by one after the trait boundary is justified by a second implementation.
 
 - `OpenCodeAdapter` is the first candidate after Codex because its auth/config surface is comparatively explicit
 - `ClaudeCodeAdapter` and `GeminiCliAdapter` should only move past proof-of-concept after identity switching and usage semantics are validated
@@ -73,5 +67,5 @@ Phase 2 adds new adapters one by one.
 
 - installer and shell integration live in `install.sh` and `install.ps1`
 - core policy lives under `src/core`
-- CLI-specific Codex behavior lives in `src/adapters/codex.rs`
+- CLI-specific Codex behavior lives under `src/adapters/codex/`
 - top-level command parsing and help live in `src/cli.rs`

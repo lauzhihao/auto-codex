@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 pub const CURRENT_ACCOUNT_MIN_FIVE_HOUR_PERCENT: f64 = 20.0;

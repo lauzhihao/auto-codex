@@ -52,6 +52,11 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} dist/${{ matrix.bin_name }}
           tar -C dist -czf scodex-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.bin_name }}
+      - name: Generate checksum (unix)
+        if: runner.os != 'Windows'
+        run: |
+          archive="scodex-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}"
+          shasum -a 256 "${archive}" > "${archive}.sha256"
       - name: Package archive (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -59,11 +64,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "dist/${{ matrix.bin_name }}"
           Compress-Archive -Path "dist/${{ matrix.bin_name }}" -DestinationPath "scodex-${{ github.ref_name }}-${{ matrix.target }}.zip"
+      - name: Generate checksum (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "scodex-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
+          Set-Content -Path "$archive.sha256" -Value "$hash  $archive" -Encoding ASCII
       - name: Upload build artifact
         uses: actions/upload-artifact@v6
         with:
           name: scodex-${{ matrix.target }}
-          path: scodex-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+          path: |
+            scodex-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+            scodex-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}.sha256
 
   publish:
     runs-on: ubuntu-latest

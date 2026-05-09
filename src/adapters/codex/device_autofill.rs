@@ -4,16 +4,31 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Error as WsError, Message, WebSocket, connect};
 
 use crate::core::ui as core_ui;
+use crate::core::ui::strip_ansi;
+
+// CDP 探测节奏比 quota 拉取快，connect 5s / read 15s 足够
+static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn http_client() -> &'static Client {
+    HTTP_CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to build CDP HTTP client")
+    })
+}
 
 const DEVICE_AUTH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DEVICE_PROMPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -281,18 +296,9 @@ fn summarize_output_text(output: &str) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-
-    Some(
-        lines
-            .into_iter()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join(" | "),
-    )
+    // 取末尾最多 4 行，切片避免双重 rev/collect
+    let start = lines.len().saturating_sub(4);
+    Some(lines[start..].join(" | "))
 }
 
 struct BrowserSession {
@@ -616,8 +622,43 @@ fn current_autofill_state_expression() -> &'static str {
 })()"#
 }
 
+/// 单次尝试从给定 endpoint 拿到 WebSocket 调试 URL；返回 Some(url) 表示成功。
+fn try_get_ws_url(client: &Client, endpoint: &str, debug: bool) -> Result<Option<String>, String> {
+    let response = client
+        .get(endpoint)
+        .send()
+        .map_err(|e| format!("failed to query {endpoint}: {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| format!("failed to read {endpoint}: {e}"))?;
+    let body = body.trim();
+
+    if !status.is_success() {
+        return Err(format!("{endpoint} returned HTTP {status}"));
+    }
+    if body.is_empty() {
+        return Err(format!("{endpoint} returned an empty body"));
+    }
+
+    let pages = serde_json::from_str::<Vec<Value>>(body).map_err(|e| {
+        if debug {
+            eprintln!("[scodex-autofill] invalid CDP page list from {endpoint}: {e}");
+        }
+        format!("{endpoint} returned invalid JSON: {e}")
+    })?;
+
+    if let Some(url) = select_cdp_page_websocket_url(&pages) {
+        return Ok(Some(url.to_string()));
+    }
+    Err(format!(
+        "{endpoint} returned {} targets but no OpenAI auth page yet",
+        pages.len()
+    ))
+}
+
 fn wait_for_cdp_websocket_url(port: u16) -> Result<String> {
-    let client = reqwest::blocking::Client::new();
+    let client = http_client();
     let debug = env::var_os("SCODEX_AUTOFILL_DEBUG").is_some();
     let started = Instant::now();
     let endpoints = [
@@ -628,50 +669,10 @@ fn wait_for_cdp_websocket_url(port: u16) -> Result<String> {
 
     while started.elapsed() < CDP_READY_TIMEOUT {
         for endpoint in &endpoints {
-            match client.get(endpoint).send() {
-                Ok(response) => {
-                    let status = response.status();
-                    match response.text() {
-                        Ok(body) => {
-                            let body = body.trim();
-                            if !status.is_success() {
-                                last_error = Some(format!("{endpoint} returned HTTP {status}"));
-                                continue;
-                            }
-                            if body.is_empty() {
-                                last_error = Some(format!("{endpoint} returned an empty body"));
-                                continue;
-                            }
-
-                            match serde_json::from_str::<Vec<Value>>(body) {
-                                Ok(pages) => {
-                                    if let Some(url) = select_cdp_page_websocket_url(&pages) {
-                                        return Ok(url.to_string());
-                                    }
-                                    last_error = Some(format!(
-                                        "{endpoint} returned {} targets but no OpenAI auth page yet",
-                                        pages.len()
-                                    ));
-                                }
-                                Err(error) => {
-                                    if debug {
-                                        eprintln!(
-                                            "[scodex-autofill] invalid CDP page list from {endpoint}: {error}"
-                                        );
-                                    }
-                                    last_error =
-                                        Some(format!("{endpoint} returned invalid JSON: {error}"));
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            last_error = Some(format!("failed to read {endpoint}: {error}"));
-                        }
-                    }
-                }
-                Err(error) => {
-                    last_error = Some(format!("failed to query {endpoint}: {error}"));
-                }
+            match try_get_ws_url(client, endpoint, debug) {
+                Ok(Some(url)) => return Ok(url),
+                Ok(None) => {}
+                Err(msg) => last_error = Some(msg),
             }
         }
         thread::sleep(CDP_POLL_INTERVAL);
@@ -892,26 +893,6 @@ pub fn parse_codex_login_prompt(raw: &str) -> Result<CodexDeviceAuthPrompt> {
     Ok(CodexDeviceAuthPrompt { url, code })
 }
 
-fn strip_ansi(raw: &str) -> String {
-    let mut output = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            let _ = chars.next();
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-            continue;
-        }
-        output.push(ch);
-    }
-
-    output
-}
-
 fn is_device_code(value: &str) -> bool {
     let trimmed = value.trim();
     let Some((left, right)) = trimmed.split_once('-') else {
@@ -957,6 +938,7 @@ fn resolve_chromium_binary_from(
         "Chromium",
     ];
 
+    // 单次遍历：先检查已知 bundle 列表，未命中再扫描目录，减少重复 stat
     for root in app_roots {
         for (bundle, binary) in KNOWN_APP_BUNDLES {
             let candidate = root.join(bundle).join("Contents/MacOS").join(binary);
@@ -964,9 +946,6 @@ fn resolve_chromium_binary_from(
                 return Some(candidate);
             }
         }
-    }
-
-    for root in app_roots {
         if let Some(found) = scan_root_for_chromium_bundle(root, CHROMIUM_EXECUTABLES) {
             return Some(found);
         }
