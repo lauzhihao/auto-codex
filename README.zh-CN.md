@@ -28,6 +28,11 @@ irm https://raw.githubusercontent.com/lauzhihao/scodex/main/install.ps1 | iex
 - macOS：`x86_64-apple-darwin`、`aarch64-apple-darwin`
 - Windows：`x86_64-pc-windows-msvc`
 
+WSL2 用户应在 WSL 内执行 Unix 安装器。它会安装 Linux 版二进制，并使用
+WSL 内的 `~/.scodex` 和 `~/.codex` 状态。runtime 会跳过 `/mnt/c/...`
+这类 Windows interop 的 `codex`/`npm` 路径；如果 `codex` 只来自 Windows，
+请在 WSL 内安装官方 Codex CLI。
+
 安装脚本会：
 
 - 从 GitHub Releases 下载预编译的 Rust 二进制

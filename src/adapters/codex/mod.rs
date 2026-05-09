@@ -11,7 +11,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use self::auth::decode_identity;
-use self::paths::{codex_home, codex_install_command, find_codex_bin, find_in_path};
+use self::paths::{codex_home, codex_install_command, find_codex_bin, find_runtime_program};
 use crate::adapters::{AdapterCapabilities, CliAdapter};
 use crate::core::policy::{
     choose_best_account, choose_current_account, choose_current_api_account,
@@ -301,7 +301,7 @@ impl CodexAdapter {
         eprintln!("{install_line}");
         eprintln!();
 
-        let Some(installer_bin) = find_in_path(&install.program) else {
+        let Some(installer_bin) = find_runtime_program(&install.program) else {
             eprintln!("{}", ui.codex_install_tool_missing(&install.program));
             eprintln!();
             eprintln!("{}", ui.manual_install());

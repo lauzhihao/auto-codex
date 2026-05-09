@@ -3,8 +3,10 @@ $ErrorActionPreference = "Stop"
 $Repo = if ($env:AUTO_CODEX_REPO) { $env:AUTO_CODEX_REPO } else { "lauzhihao/scodex" }
 $ScodexHome = if ($env:SCODEX_HOME) { $env:SCODEX_HOME } else { Join-Path $HOME ".scodex" }
 $BinDir = Join-Path $ScodexHome "bin"
-$ShimPath = Join-Path $HOME ".local\bin\scodex.exe"
-$CompatShimPath = Join-Path $HOME ".local\bin\auto-codex.exe"
+$ShimPath = Join-Path $HOME ".local\bin\scodex.cmd"
+$CompatShimPath = Join-Path $HOME ".local\bin\auto-codex.cmd"
+$LegacyExeShimPath = Join-Path $HOME ".local\bin\scodex.exe"
+$LegacyCompatExeShimPath = Join-Path $HOME ".local\bin\auto-codex.exe"
 $OriginalWrapperPath = Join-Path $HOME ".local\bin\scodex-original.cmd"
 $Version = $env:AUTO_CODEX_VERSION
 
@@ -41,8 +43,29 @@ function Ensure-UserPath {
   }
 }
 
+function Remove-LegacyExeShim {
+  param([string]$Path)
+
+  if (-not (Test-Path $Path)) {
+    return
+  }
+
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($bytes.Length -ge 2 -and $bytes[0] -eq 0x4D -and $bytes[1] -eq 0x5A) {
+    return
+  }
+
+  $prefixLength = [Math]::Min($bytes.Length, 4096)
+  $prefix = [Text.Encoding]::ASCII.GetString($bytes, 0, $prefixLength)
+  if ($prefix.Contains("@echo off") -and $prefix.Contains("SCODEX_HOME")) {
+    Remove-Item -Path $Path -Force
+  }
+}
+
 function Install-ShimScripts {
   New-Item -ItemType Directory -Path (Split-Path $ShimPath) -Force | Out-Null
+  Remove-LegacyExeShim $LegacyExeShimPath
+  Remove-LegacyExeShim $LegacyCompatExeShimPath
 
   $shimContent = @"
 @echo off

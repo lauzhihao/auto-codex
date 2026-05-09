@@ -54,6 +54,60 @@ detect_target() {
   esac
 }
 
+is_wsl_environment() {
+  if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
+    return 0
+  fi
+
+  if [[ -r /proc/sys/kernel/osrelease ]] \
+    && grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease; then
+    return 0
+  fi
+
+  if [[ -r /proc/version ]] && grep -qiE 'microsoft|wsl' /proc/version; then
+    return 0
+  fi
+
+  return 1
+}
+
+is_windows_interop_command() {
+  local path
+  path="$1"
+  case "${path}" in
+    /mnt/[a-zA-Z]/*|/mnt/[a-zA-Z]\\*|*.cmd|*.CMD|*.bat|*.BAT|*.exe|*.EXE)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+warn_wsl_runtime_paths() {
+  local cmd path found_windows_path=0
+
+  if ! is_wsl_environment; then
+    return 0
+  fi
+
+  echo "WSL environment detected; installing the Linux/WSL scodex binary."
+  echo "scodex will use WSL-local state under ${SCODEX_HOME} and ${HOME}/.codex."
+
+  for cmd in codex npm; do
+    path="$(command -v "${cmd}" 2>/dev/null || true)"
+    if [[ -n "${path}" ]] && is_windows_interop_command "${path}"; then
+      echo "Warning: ${cmd} resolves to a Windows PATH entry: ${path}" >&2
+      found_windows_path=1
+    fi
+  done
+
+  if [[ "${found_windows_path}" -ne 0 ]]; then
+    echo "Install the Linux versions inside WSL, or put WSL-local bin directories before Windows PATH entries." >&2
+    echo "The scodex runtime skips Windows interop codex/npm paths when running under WSL." >&2
+  fi
+}
+
 resolve_version() {
   if [[ -n "${VERSION}" ]]; then
     echo "${VERSION}"
@@ -159,6 +213,7 @@ print_next_steps() {
 
 show_requirements
 TARGET="$(detect_target)"
+warn_wsl_runtime_paths
 VERSION="$(resolve_version)"
 download_and_install "${VERSION}" "${TARGET}"
 install_shim_scripts

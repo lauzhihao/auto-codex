@@ -28,6 +28,11 @@ Current prebuilt release targets:
 - macOS: `x86_64-apple-darwin`, `aarch64-apple-darwin`
 - Windows: `x86_64-pc-windows-msvc`
 
+WSL2 users should run the Unix installer inside WSL. This installs the Linux
+binary and uses WSL-local state under `~/.scodex` and `~/.codex`. The runtime
+skips Windows interop `codex`/`npm` paths such as `/mnt/c/...`; install the
+official Codex CLI inside WSL if `codex` is only available from Windows.
+
 The installer:
 
 - downloads a prebuilt Rust release binary from GitHub Releases
