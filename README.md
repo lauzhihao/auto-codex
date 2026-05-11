@@ -2,6 +2,8 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
+If you need a reliable and affordable third-party relay service with excellent support, I have used this one for a long time and it has been very stable: <https://codeproxy.dev/register?aff=48C6FEHD>
+
 `scodex` selects the Codex account with the best immediately usable quota, switches `~/.codex/auth.json`, and then launches or resumes Codex.
 
 The repository is intentionally code-only. It does not contain account pool data, cached usage, local config, or virtualenv files.
