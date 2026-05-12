@@ -2,8 +2,6 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-顺手分享一个我用了很久的第三方中转服务，稳定、便宜、售后也非常赞：<https://codeproxy.dev/register?aff=48C6FEHD>
-
 `scodex` 会选择当前“立刻可用额度”最合适的 Codex 账号，切换 `~/.codex/auth.json`，然后启动或恢复 Codex。
 
 这个仓库只包含代码，不包含账号池数据、额度缓存、本地配置或虚拟环境文件。
@@ -311,3 +309,7 @@ scodex exec "fix failing test"
 - CI 现在只维护 Rust 实现。
 - `v*` 标签会通过 GitHub Actions 发布预编译二进制。
 - 历史 Python 实现已经从这个仓库中移除。
+
+## 推荐
+
+如果你需要稳定、便宜、售后也很好的第三方中转服务，推荐这个我用了很久的服务：<https://codeproxy.dev/register?aff=48C6FEHD>

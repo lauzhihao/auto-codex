@@ -2,8 +2,6 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-If you need a reliable and affordable third-party relay service with excellent support, I have used this one for a long time and it has been very stable: <https://codeproxy.dev/register?aff=48C6FEHD>
-
 `scodex` selects the Codex account with the best immediately usable quota, switches `~/.codex/auth.json`, and then launches or resumes Codex.
 
 The repository is intentionally code-only. It does not contain account pool data, cached usage, local config, or virtualenv files.
@@ -311,3 +309,7 @@ Before pushing:
 - CI now targets the Rust implementation only.
 - Tagged releases `v*` publish prebuilt binaries through GitHub Actions.
 - The historical Python implementation has been removed from this repository.
+
+## Recommendation
+
+If you need a reliable and affordable third-party relay service with excellent support, I recommend the one I have used for a long time: <https://codeproxy.dev/register?aff=48C6FEHD>
